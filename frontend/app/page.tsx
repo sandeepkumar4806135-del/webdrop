@@ -1,19 +1,29 @@
 "use client";
 
-import { useState, useEffect, useRef, type ChangeEvent, type DragEvent } from "react";
-import { io, type Socket } from "socket.io-client";
+import {
+  useState,
+  useEffect,
+  useRef,
+  useCallback,
+  type ChangeEvent,
+  type DragEvent,
+} from "react";
 import QRCode from "qrcode";
 
 // The different screens this page can show
 type Screen = "start" | "sending" | "receiving" | "connected";
 
-// The shapes of messages relayed through the "signal" socket event
+// The shapes of messages that travel through the /api/signal route
 type SignalMessage =
   | { type: "offer" | "answer"; sdp: RTCSessionDescriptionInit }
   | { type: "ice-candidate"; candidate: RTCIceCandidateInit };
 
 // Metadata describing a file being transferred over the data channel
 type IncomingFileMeta = { name: string; size: number; mime: string };
+
+// How often (in milliseconds) each side asks the server "any new messages?".
+// This replaces Socket.io, which used to push messages to us instantly.
+const POLL_INTERVAL_MS = 1200;
 
 export default function Home() {
   // Which screen we are currently on
@@ -48,17 +58,17 @@ export default function Home() {
   // Whether the user is currently dragging a file over the drop zone
   const [isDragging, setIsDragging] = useState(false);
 
-  // Keep a reference to the socket so the button handlers can use it,
-  // and a reference to which flow (send or receive) is active. Refs let us
-  // read the latest value even inside socket event handlers that are set up once.
-  const socketRef = useRef<Socket | null>(null);
+  // Which flow is active: "sending" (we clicked Send) or "receiving"
   const flowRef = useRef<"sending" | "receiving">("sending");
+  // Holds the id of our polling timer so we can stop it later.
+  // (Replaces the old socketRef that used to hold the Socket.io connection.)
+  const pollRef = useRef<ReturnType<typeof setInterval> | null>(null);
 
   // Refs for the WebRTC peer connection and data channel.
   // Storing them in refs lets them survive across re-renders.
   const peerConnectionRef = useRef<RTCPeerConnection | null>(null);
   const dataChannelRef = useRef<RTCDataChannel | null>(null);
-  // The 4-digit code for our current room (needed to send signals)
+  // The 4-digit code for our current room (needed for every signal we send)
   const codeRef = useRef("");
 
   // Refs for an incoming file. They must survive across multiple onmessage
@@ -68,257 +78,333 @@ export default function Home() {
   const incomingBytesRef = useRef(0);
   const receivedChunksRef = useRef(0);
 
-  // 2. Connect to the signaling server when the component loads.
-  //    setScreen/set* are stable, so this effect only runs once.
-  useEffect(() => {
-    const socket = io(process.env.NEXT_PUBLIC_SERVER_URL || "http://localhost:4000");
-    socketRef.current = socket;
+  // ============================================================
+  // SIGNALING VIA HTTP POLLING (replaces the old Socket.io events)
+  // Instead of a server pushing messages to us instantly, we ask the
+  // /api/signal route "give me everything new" every 1.2 seconds.
+  // ============================================================
 
-    // --- Sender flow ---
-    // The server created a room with a 4-digit code.
-    socket.on("room-created", async (newCode: string) => {
-      codeRef.current = newCode; // remember the code so we can send signals
-      setCode(newCode);
-      setScreen("sending");
+  // Our role in this pairing: "creator" (clicked Send) or "joiner" (Receive).
+  // The API routes use this to decide which Redis queue is ours.
+  const myRole = (): "creator" | "joiner" =>
+    flowRef.current === "receiving" ? "joiner" : "creator";
 
-      // Generate the QR image that encodes the 4-digit code as text
-      const dataUrl = await QRCode.toDataURL(newCode);
-      setQrDataUrl(dataUrl);
+  // Stop the polling loop. Used on "Start over" and when the page unmounts.
+  const stopPolling = useCallback(() => {
+    if (pollRef.current !== null) {
+      clearInterval(pollRef.current);
+      pollRef.current = null;
+    }
+  }, []);
 
-      setStatusMessage("Waiting for the other device to connect...");
+  // Send a signaling message to the other peer by POSTing it to /api/signal.
+  // The API route stores it in the OTHER peer's queue in Redis, and the other
+  // peer picks it up on their next poll.
+  const sendSignal = (data: unknown) => {
+    fetch("/api/signal", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ code: codeRef.current, role: myRole(), data }),
+    }).catch((err) => console.error("Error sending signal", err));
+  };
+
+  // Create a fresh RTCPeerConnection using a free STUN server.
+  // STUN helps the two browsers discover each other over the internet.
+  const setupPeerConnection = () => {
+    const pc = new RTCPeerConnection({
+      iceServers: [{ urls: "stun:stun.l.google.com:19302" }],
     });
 
-    // ============================================================
-    // WebRTC helpers: set up the direct peer-to-peer data connection
-    // ============================================================
-
-    // Send a small signaling message through the socket to the other peer
-    const sendSignal = (data: unknown) => {
-      socketRef.current?.emit("signal", {
-        code: codeRef.current,
-        data,
-      });
-    };
-
-    // Create a fresh RTCPeerConnection using a free STUN server.
-    // STUN helps the two browsers discover each other over the internet.
-    const setupPeerConnection = () => {
-      const pc = new RTCPeerConnection({
-        iceServers: [{ urls: "stun:stun.l.google.com:19302" }],
-      });
-
-      // Whenever we generate an ICE candidate, relay it to the other peer
-      pc.onicecandidate = (event) => {
-        if (event.candidate) {
-          sendSignal({ type: "ice-candidate", candidate: event.candidate });
-        }
-      };
-
-      peerConnectionRef.current = pc;
-      return pc;
-    };
-
-    // Wire up a data channel's event listeners (used by both sides)
-    const setupDataChannel = (channel: RTCDataChannel) => {
-      dataChannelRef.current = channel;
-
-      // Receive file chunks as ArrayBuffers (not binary strings) so we can
-      // easily combine them into a Blob at the end.
-      channel.binaryType = "arraybuffer";
-
-      // When the channel opens, the direct P2P link is ready
-      channel.onopen = () => {
-        setDataChannelOpen(true);
-        setStatusMessage("P2P connection established!");
-      };
-
-      // Handle everything that arrives through the channel:
-      // - strings: file control messages (file-meta / file-end) or chat text
-      // - ArrayBuffer: one chunk of an incoming file
-      channel.onmessage = (event) => {
-        if (typeof event.data === "string") {
-          const text = event.data as string;
-
-          // File control messages are JSON, so they start with "{"
-          if (text.startsWith("{")) {
-            try {
-              const parsed = JSON.parse(text);
-
-              // "file-meta": a new file is starting. Remember its details and
-              // reset the buffer we use to collect its chunks.
-              if (parsed.type === "file-meta") {
-                incomingMetaRef.current = {
-                  name: parsed.name as string,
-                  size: parsed.size as number,
-                  mime: parsed.mime as string,
-                };
-                incomingChunksRef.current = [];
-                incomingBytesRef.current = 0;
-                receivedChunksRef.current = 0;
-                setIncomingFile(null);
-                setReceiveProgress(0);
-                return;
-              }
-
-              // "file-end": every chunk arrived. Combine them into a Blob and
-              // give the user a download link.
-              if (parsed.type === "file-end") {
-                const meta = incomingMetaRef.current;
-                if (meta && incomingChunksRef.current.length > 0) {
-                  const blob = new Blob(incomingChunksRef.current, {
-                    type: meta.mime,
-                  });
-                  setIncomingFile({
-                    name: meta.name,
-                    url: URL.createObjectURL(blob),
-                  });
-                  setReceiveProgress(100);
-                }
-                return;
-              }
-            } catch {
-              // Not valid JSON, so fall through and show it as a chat message
-            }
-          }
-
-          // Plain text that isn't a file control message = a chat message
-          setMessages((prev) => [...prev, text]);
-        } else {
-          // ArrayBuffer: save this chunk of the file currently being received
-          const chunk = event.data as ArrayBuffer;
-          if (incomingMetaRef.current) {
-            incomingChunksRef.current.push(chunk);
-            incomingBytesRef.current += chunk.byteLength;
-            receivedChunksRef.current++;
-
-            // Update the progress bar only every 10 chunks (not every chunk)
-            // to avoid re-rendering too often while receiving a large file.
-            if (receivedChunksRef.current % 10 === 0) {
-              const total = incomingMetaRef.current.size;
-              setReceiveProgress(
-                Math.min(
-                  100,
-                  Math.floor((incomingBytesRef.current / total) * 100)
-                )
-              );
-            }
-          }
-        }
-      };
-    };
-
-    // Offer side (the "Send" side): create the channel and send the SDP offer
-    const startOffer = async () => {
-      const pc = setupPeerConnection();
-
-      // The offer creator always initiates the data channel
-      const channel = pc.createDataChannel("webdrop");
-      setupDataChannel(channel);
-
-      try {
-        const offer = await pc.createOffer();
-        await pc.setLocalDescription(offer);
-        sendSignal({ type: "offer", sdp: pc.localDescription });
-      } catch (err) {
-        console.error("Error creating the offer", err);
+    // Whenever we generate an ICE candidate, relay it to the other peer
+    pc.onicecandidate = (event) => {
+      if (event.candidate) {
+        sendSignal({ type: "ice-candidate", candidate: event.candidate });
       }
     };
 
-    // Answer side (the "Receive" side): wait for the incoming data channel
-    const startAnswer = () => {
-      const pc = setupPeerConnection();
-      pc.ondatachannel = (event) => {
-        setupDataChannel(event.channel);
-      };
+    peerConnectionRef.current = pc;
+    return pc;
+  };
+
+// Wire up a data channel's event listeners (used by both sides)
+  const setupDataChannel = (channel: RTCDataChannel) => {
+    dataChannelRef.current = channel;
+
+    // Receive file chunks as ArrayBuffers (not binary strings) so we can
+    // easily combine them into a Blob at the end.
+    channel.binaryType = "arraybuffer";
+
+    // When the channel opens, the direct P2P link is ready
+    channel.onopen = () => {
+      setDataChannelOpen(true);
+      setStatusMessage("P2P connection established!");
     };
 
-    // Handle every "signal" event relayed through the socket
-    const handleSignal = async (data: SignalMessage) => {
-      const pc = peerConnectionRef.current;
-      if (!pc) return;
+    // Handle everything that arrives through the channel:
+    // - strings: file control messages (file-meta / file-end) or chat text
+    // - ArrayBuffer: one chunk of an incoming file
+    channel.onmessage = (event) => {
+      if (typeof event.data === "string") {
+        const text = event.data as string;
 
-      try {
-        if (data.type === "offer") {
-          // Answer side: save the offer, then send back an answer
-          await pc.setRemoteDescription(new RTCSessionDescription(data.sdp));
-          const answer = await pc.createAnswer();
-          await pc.setLocalDescription(answer);
-          sendSignal({ type: "answer", sdp: pc.localDescription });
-        } else if (data.type === "answer") {
-          // Offer side: save the answer to finish the handshake
-          await pc.setRemoteDescription(new RTCSessionDescription(data.sdp));
-        } else if (data.type === "ice-candidate") {
-          // Both sides: add the remote ICE candidate
+        // File control messages are JSON, so they start with "{"
+        if (text.startsWith("{")) {
           try {
-            await pc.addIceCandidate(data.candidate);
+            const parsed = JSON.parse(text);
+
+            // "file-meta": a new file is starting. Remember its details and
+            // reset the buffer we use to collect its chunks.
+            if (parsed.type === "file-meta") {
+              incomingMetaRef.current = {
+                name: parsed.name as string,
+                size: parsed.size as number,
+                mime: parsed.mime as string,
+              };
+              incomingChunksRef.current = [];
+              incomingBytesRef.current = 0;
+              receivedChunksRef.current = 0;
+              setIncomingFile(null);
+              setReceiveProgress(0);
+              return;
+            }
+
+            // "file-end": every chunk arrived. Combine them into a Blob and
+            // give the user a download link.
+            if (parsed.type === "file-end") {
+              const meta = incomingMetaRef.current;
+              if (meta && incomingChunksRef.current.length > 0) {
+                const blob = new Blob(incomingChunksRef.current, {
+                  type: meta.mime,
+                });
+                setIncomingFile({
+                  name: meta.name,
+                  url: URL.createObjectURL(blob),
+                });
+                setReceiveProgress(100);
+              }
+              return;
+            }
           } catch {
-            // Candidates can arrive out of order; ignore harmless errors
+            // Not valid JSON, so fall through and show it as a chat message
           }
         }
-      } catch (err) {
-        console.error("Error handling signaling message", err);
+
+        // Plain text that isn't a file control message = a chat message
+        setMessages((prev) => [...prev, text]);
+      } else {
+        // ArrayBuffer: save this chunk of the file currently being received
+        const chunk = event.data as ArrayBuffer;
+        if (incomingMetaRef.current) {
+          incomingChunksRef.current.push(chunk);
+          incomingBytesRef.current += chunk.byteLength;
+          receivedChunksRef.current++;
+
+          // Update the progress bar only every 10 chunks (not every chunk)
+          // to avoid re-rendering too often while receiving a large file.
+          if (receivedChunksRef.current % 10 === 0) {
+            const total = incomingMetaRef.current.size;
+            setReceiveProgress(
+              Math.min(100, Math.floor((incomingBytesRef.current / total) * 100))
+            );
+          }
+        }
       }
     };
+  };
 
-    // --- Both flows ---
-    // A peer joined our room, so we are now connected.
-    socket.on("peer-joined", () => {
-      setScreen("connected");
-      // Show a different message depending on which side we are
-      setStatusMessage(
-        flowRef.current === "receiving"
-          ? "Connected! (paired with sender)"
-          : "Connected! (peer joined)"
-      );
+  // Offer side (the "Send" side): create the channel and send the SDP offer
+  const startOffer = async () => {
+    const pc = setupPeerConnection();
 
-      // Start the WebRTC handshake now that both peers are present
-      if (flowRef.current === "sending") {
-        // The "Send" side creates and sends the offer
-        startOffer();
-      } else {
-        // The "Receive" side waits for the incoming data channel
-        startAnswer();
+    // The offer creator always initiates the data channel
+    const channel = pc.createDataChannel("webdrop");
+    setupDataChannel(channel);
+
+    try {
+      const offer = await pc.createOffer();
+      await pc.setLocalDescription(offer);
+      sendSignal({ type: "offer", sdp: pc.localDescription });
+    } catch (err) {
+      console.error("Error creating the offer", err);
+    }
+  };
+
+  // Answer side (the "Receive" side): wait for the incoming data channel
+  const startAnswer = () => {
+    const pc = setupPeerConnection();
+    pc.ondatachannel = (event) => {
+      setupDataChannel(event.channel);
+    };
+  };
+
+  // Handle one signaling message from the other peer
+  // (offer / answer / ice-candidate - the WebRTC handshake steps)
+  const handleSignal = async (data: SignalMessage) => {
+    const pc = peerConnectionRef.current;
+    if (!pc) return;
+
+    try {
+      if (data.type === "offer") {
+        // Answer side: save the offer, then send back an answer
+        await pc.setRemoteDescription(new RTCSessionDescription(data.sdp));
+        const answer = await pc.createAnswer();
+        await pc.setLocalDescription(answer);
+        sendSignal({ type: "answer", sdp: pc.localDescription });
+      } else if (data.type === "answer") {
+        // Offer side: save the answer to finish the handshake
+        await pc.setRemoteDescription(new RTCSessionDescription(data.sdp));
+      } else if (data.type === "ice-candidate") {
+        // Both sides: add the remote ICE candidate
+        try {
+          await pc.addIceCandidate(data.candidate);
+        } catch {
+          // Candidates can arrive out of order; ignore harmless errors
+        }
       }
-    });
+    } catch (err) {
+      console.error("Error handling signaling message", err);
+    }
+  };
 
-    // Relay WebRTC signaling (offer / answer / ice-candidate)
-    socket.on("signal", handleSignal);
+// Runs when we know the other peer is in the room.
+  // (This used to be the "peer-joined" socket event handler. Now the creator
+  // gets a { type: "peer-joined" } message from polling, and the joiner calls
+  // this directly after a successful join-room request.)
+  const onPeerJoined = () => {
+    // Start the WebRTC handshake only once (clicking Connect twice should
+    // not create a second peer connection)
+    if (peerConnectionRef.current) return;
 
-    // --- Receiver flow ---
-    // The code we typed does not match any active room.
-    socket.on("room-not-found", () => {
-      setErrorMessage("Code not found, please check and try again.");
-    });
+    setScreen("connected");
+    // Show a different message depending on which side we are
+    setStatusMessage(
+      flowRef.current === "receiving"
+        ? "Connected! (paired with sender)"
+        : "Connected! (peer joined)"
+    );
 
-    // Clean up the connection when the component unmounts
+    if (flowRef.current === "sending") {
+      // The "Send" side creates and sends the offer
+      startOffer();
+    } else {
+      // The "Receive" side waits for the incoming data channel
+      startAnswer();
+    }
+  };
+
+  // Ask the server once for every message waiting in our queue and process
+  // them one by one. (This replaces the old "signal" socket event handler.)
+  const pollOnce = async () => {
+    const code = codeRef.current;
+    if (!code) return;
+
+    try {
+      const res = await fetch(
+        `/api/signal?code=${encodeURIComponent(code)}&role=${myRole()}`
+      );
+      if (!res.ok) return; // e.g. bad request - just try again on the next tick
+
+      const json = (await res.json()) as { messages?: unknown[] };
+
+      for (const raw of json.messages ?? []) {
+        // Every queued message is an object with a "type" field
+        if (!raw || typeof raw !== "object" || !("type" in raw)) continue;
+        const data = raw as { type: string };
+
+        if (data.type === "peer-joined") {
+          // The creator learns this way that the joiner arrived
+          onPeerJoined();
+        } else {
+          // offer / answer / ice-candidate - same handling as before
+          await handleSignal(raw as SignalMessage);
+        }
+      }
+    } catch (err) {
+      console.error("Error while polling for signaling messages", err);
+    }
+  };
+
+  // Start asking the server for new signaling messages every 1.2 seconds
+  const startPolling = () => {
+    stopPolling(); // never run two polling loops at the same time
+    pollRef.current = setInterval(() => {
+      void pollOnce();
+    }, POLL_INTERVAL_MS);
+  };
+
+  // Stop polling and close the WebRTC resources when the page unmounts,
+  // so we never leave a timer or a connection running behind us.
+  useEffect(() => {
     return () => {
-      socket.disconnect();
-      socketRef.current = null;
-      // Close the WebRTC resources too
+      stopPolling();
       dataChannelRef.current?.close();
       peerConnectionRef.current?.close();
     };
-  }, []);
+  }, [stopPolling]);
 
-// 4. Sender: ask the server to create a new room
-  const handleSend = () => {
+  // Sender: ask the server to create a room, show the code, and start polling
+  const handleSend = async () => {
     flowRef.current = "sending";
-    socketRef.current?.emit("create-room");
+
+    try {
+      const res = await fetch("/api/create-room", { method: "POST" });
+      if (!res.ok)
+        throw new Error(`create-room failed with status ${res.status}`);
+      const json = (await res.json()) as { code: string };
+
+      // Remember the code (needed for every signal we send) and show it
+      codeRef.current = json.code;
+      setCode(json.code);
+      setScreen("sending");
+
+      // Generate the QR image that encodes the 4-digit code as text
+      const dataUrl = await QRCode.toDataURL(json.code);
+      setQrDataUrl(dataUrl);
+
+      setStatusMessage("Waiting for the other device to connect...");
+
+      // Start listening for the joiner and for WebRTC messages
+      startPolling();
+    } catch (err) {
+      console.error("Error creating a room", err);
+    }
   };
 
-  // 5. Receiver: join the room with the typed code
-  const handleConnect = () => {
+  // Receiver: join the room with the typed code, then start polling
+  const handleConnect = async () => {
     if (inputCode.trim().length === 0) {
       setErrorMessage("Please enter the 4-digit code.");
       return;
     }
     flowRef.current = "receiving";
     codeRef.current = inputCode.trim(); // remember the code so we can send signals
-    setErrorMessage("");
-    socketRef.current?.emit("join-room", inputCode.trim());
+
+    try {
+      const res = await fetch("/api/join-room", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ code: inputCode.trim() }),
+      });
+
+      if (!res.ok) {
+        // The API returns 404 when the code matches no active room
+        setErrorMessage("Code not found, please check and try again.");
+        return;
+      }
+
+      setErrorMessage("");
+      // A successful join already tells US that we are in, so treat it as our
+      // own "peer-joined" to kick off the WebRTC answer flow right away.
+      // (The creator finds out separately by polling their own queue.)
+      startPolling();
+      onPeerJoined();
+    } catch (err) {
+      console.error("Error joining the room", err);
+      setErrorMessage("Something went wrong, please try again.");
+    }
   };
 
-  // Send a text message through the data channel for testing
+// Send a text message through the data channel for testing
   const handleSendMessage = () => {
     // Only send if the direct channel is actually open
     if (dataChannelRef.current?.readyState === "open" && messageInput.trim()) {
@@ -410,6 +496,8 @@ export default function Home() {
 
   // Reset everything and go back to the start screen
   const handleReset = () => {
+    stopPolling(); // stop asking the server for new messages
+    codeRef.current = "";
     setScreen("start");
     setCode("");
     setQrDataUrl("");
@@ -436,7 +524,7 @@ export default function Home() {
     peerConnectionRef.current = null;
   };
 
-  return (
+return (
     <main className="flex min-h-screen flex-col items-center justify-center bg-zinc-50 p-6 font-sans dark:bg-black">
       <div className="w-full max-w-md rounded-2xl bg-white p-8 shadow-lg dark:bg-zinc-900">
         {/* Heading, always visible */}
@@ -461,7 +549,8 @@ export default function Home() {
             </button>
           </div>
         )}
-{/* SENDING screen: show the code, QR code, and status */}
+
+        {/* SENDING screen: show the code, QR code, and status */}
         {screen === "sending" && (
           <div className="flex flex-col items-center gap-4 text-center">
             <p className="text-sm text-zinc-500 dark:text-zinc-400">
@@ -517,7 +606,8 @@ export default function Home() {
             )}
           </div>
         )}
-{/* CONNECTED screen: show success + a reset button */}
+
+{/* CONNECTED screen: success + messenger + file transfer + reset */}
         {screen === "connected" && (
           <div className="flex flex-col items-center gap-4 text-center">
             <div className="flex h-14 w-14 items-center justify-center rounded-full bg-green-100 text-3xl dark:bg-green-900">
@@ -563,7 +653,7 @@ export default function Home() {
               </div>
             )}
 
-            {/* File transfer section: appears once the P2P data channel is open */}
+{/* File transfer section: appears once the P2P data channel is open */}
             {dataChannelOpen && (
               <div className="flex w-full flex-col gap-3 border-t border-zinc-200 pt-4 dark:border-zinc-700">
                 {/* Drag-and-drop zone. Clicking it opens the hidden file picker.
@@ -646,3 +736,9 @@ export default function Home() {
     </main>
   );
 }
+
+
+
+
+
+

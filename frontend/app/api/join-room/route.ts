@@ -1,0 +1,45 @@
+// POST /api/join-room
+// A joiner calls this with a 4-digit code. If the room exists we drop a
+// "peer-joined" message into the creator's queue (so the creator sees it on
+// their next poll) and tell the joiner that the join worked.
+import { NextResponse, type NextRequest } from "next/server";
+import { Redis } from "@upstash/redis";
+
+// Queues live for 10 minutes after their last message, just like rooms,
+// so empty leftovers get cleaned up by Redis automatically.
+const QUEUE_TTL_SECONDS = 600;
+
+export async function POST(request: NextRequest) {
+  // Read the { code } that the joiner sent in the request body.
+  // .catch(() => null) protects us if the body is not valid JSON.
+  const body = await request.json().catch(() => null);
+  const code = body?.code as string | undefined;
+
+  // Basic check: the code must be a 4-digit string like "3841"
+  if (!code || !/^\d{4}$/.test(code)) {
+    return NextResponse.json({ error: "bad-request" }, { status: 400 });
+  }
+
+  // Create the Redis client from UPSTASH_REDIS_REST_URL / _TOKEN
+  const redis = Redis.fromEnv();
+
+  // If the room does not exist (never created, or already expired)
+  // tell the joiner it was not found.
+  const exists = await redis.exists(`room:${code}`);
+  if (!exists) {
+    return NextResponse.json({ error: "not-found" }, { status: 404 });
+  }
+
+  // Push a "peer-joined" message into the creator's queue. The creator is
+  // polling that queue every ~1.2 seconds and will pick this up.
+  const queue = `queue:${code}:toCreator`;
+  await redis
+    .pipeline()
+    .rpush(queue, JSON.stringify({ type: "peer-joined" }))
+    .expire(queue, QUEUE_TTL_SECONDS) // keep Redis tidy
+    .exec();
+
+  // The joiner treats this success response as their own "peer-joined",
+  // so no message is needed in the joiner's queue for this.
+  return NextResponse.json({ success: true });
+}
