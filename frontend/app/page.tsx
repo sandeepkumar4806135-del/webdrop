@@ -118,6 +118,66 @@ export default function Home() {
   const sendSpeedRef = useRef({ lastUpdate: 0, lastBytes: 0 });
   const receiveSpeedRef = useRef({ lastUpdate: 0, lastBytes: 0 });
 
+  // SELF-DESTRUCT: after a transfer completes, the session closes itself after
+  // an inactivity countdown so leftover files/messages don't linger on screen.
+  // - countdown: remaining seconds to live (0 = not running / cancelled)
+  // - countdownRef: the live setInterval id so we can stop it any time
+  // The countdown is (re)started after each file transfer finishes, and reset
+  // back to 30s if anything new happens before it hits zero.
+  const [countdown, setCountdown] = useState(0);
+  const countdownRef = useRef<ReturnType<typeof setInterval> | null>(null);
+  const COUNTDOWN_SECONDS = 30;
+  // Tracks whether at least one transfer has finished. We only ever start the
+  // self-destruct timer AFTER the first transfer completes (not on plain chat
+  // messages), so the session doesn't auto-close before anything happened.
+  const transferCompletedRef = useRef(false);
+
+  // Helper: start (or restart) the inactivity countdown.
+  // Called after a transfer completes and again whenever the peers talk.
+  // Declared as a plain function (not useCallback) on purpose: it references
+  // handleReset, which is defined later in this component. As a callback body it
+  // only reads handleReset at call time (after render), so there's no stale
+  // closure or temporal-dead-zone problem, and no hook-dependency lint issue.
+  const startSelfDestruct = () => {
+    // Stop any existing timer first so we never stack multiple countdowns
+    if (countdownRef.current !== null) {
+      clearInterval(countdownRef.current);
+    }
+    setCountdown(COUNTDOWN_SECONDS);
+    countdownRef.current = setInterval(() => {
+      setCountdown((prev) => {
+        if (prev <= 1) {
+          // Time's up: clean up the connection and go back to the start screen
+          // (same effect as the user clicking "Start over" themselves).
+          clearInterval(countdownRef.current as unknown as number);
+          countdownRef.current = null;
+          handleReset();
+          return 0;
+        }
+        return prev - 1;
+      });
+    }, 1000);
+  };
+
+  // Helper: stop the countdown, e.g. if the user clicks "Cancel" or does
+  // anything that would make closing the session pointless.
+  const cancelSelfDestruct = () => {
+    if (countdownRef.current !== null) {
+      clearInterval(countdownRef.current);
+      countdownRef.current = null;
+    }
+    setCountdown(0);
+  };
+
+  // If the timer is already running and a transfer has finished, "activity"
+  // (a new message chunk, a chat message, a new file) resets the 30s window
+  // so the session only closes after real inactivity.
+  const resetSelfDestructIfRunning = () => {
+    if (transferCompletedRef.current && countdownRef.current !== null) {
+      startSelfDestruct();
+    }
+  };
+
   // ============================================================
   // SIGNALING VIA HTTP POLLING (replaces the old Socket.io events)
   // Instead of a server pushing messages to us instantly, we ask the
@@ -214,6 +274,9 @@ export default function Home() {
     // - strings: file control messages (file-meta / file-end) or chat text
     // - ArrayBuffer: one chunk of an incoming file
     channel.onmessage = (event) => {
+      // Any incoming message counts as "activity": if the self-destruct timer
+      // is already running, give the session another 30s before it closes.
+      resetSelfDestructIfRunning();
       if (typeof event.data === "string") {
         const text = event.data as string;
 
@@ -264,6 +327,9 @@ export default function Home() {
               // Transfer finished: clear the live speed/warning text
               setReceiveSpeedText("");
               setLargeFileWarning(false);
+              // A transfer just finished: arm the self-destruct countdown
+              transferCompletedRef.current = true;
+              startSelfDestruct();
               return;
             }
           } catch {
@@ -437,6 +503,12 @@ export default function Home() {
   useEffect(() => {
     return () => {
       stopPolling();
+      // SELF-DESTRUCT: make sure the countdown timer doesn't outlive the
+      // component (e.g. user closes the tab mid-countdown).
+      if (countdownRef.current !== null) {
+        clearInterval(countdownRef.current);
+        countdownRef.current = null;
+      }
       dataChannelRef.current?.close();
       peerConnectionRef.current?.close();
     };
@@ -573,6 +645,10 @@ export default function Home() {
         channel.send(JSON.stringify({ type: "file-end" }));
         setSendProgress(100);
         setSendSpeedText("");
+        // A transfer just finished: arm the self-destruct countdown
+        // (same as the receiver does when it gets the file-end).
+        transferCompletedRef.current = true;
+        startSelfDestruct();
         return;
       }
 
@@ -633,6 +709,14 @@ export default function Home() {
   // Reset everything and go back to the start screen
   const handleReset = () => {
     stopPolling(); // stop asking the server for new messages
+    // SELF-DESTRUCT: clear the inactivity countdown too, so a manual
+    // "Start over" never leaves a timer running in the background.
+    if (countdownRef.current !== null) {
+      clearInterval(countdownRef.current);
+      countdownRef.current = null;
+    }
+    setCountdown(0);
+    transferCompletedRef.current = false;
     codeRef.current = "";
     setScreen("start");
     setCode("");
@@ -877,6 +961,21 @@ export default function Home() {
                   </a>
                 )}
               </div>
+            )}
+            {/* SELF-DESTRUCT: after a transfer completes the session closes
+                itself after 30s of inactivity. The Cancel link stops it, and
+                any new message/file resets the 30s window. */}
+            {countdown > 0 && (
+              <p className="text-xs text-zinc-500 dark:text-zinc-400">
+                This session will close automatically in {countdown}s for
+                privacy.{" "}
+                <button
+                  onClick={cancelSelfDestruct}
+                  className="font-semibold text-indigo-600 underline dark:text-indigo-400"
+                >
+                  Cancel
+                </button>
+              </p>
             )}
             <button
               onClick={handleReset}
