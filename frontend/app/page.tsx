@@ -21,6 +21,35 @@ type SignalMessage =
 // Metadata describing a file being transferred over the data channel
 type IncomingFileMeta = { name: string; size: number; mime: string };
 
+// Human-readable transfer speed + estimated time remaining.
+// Given a throughput in bytes/sec and how many bytes are left to go,
+// return a string like "3.2 MB/s • ~12s remaining".
+const formatSpeedEta = (
+  bytesPerSec: number,
+  bytesRemaining: number,
+): string => {
+  if (bytesPerSec <= 0) return "";
+
+  // Pick a friendly unit for the speed
+  let speed: string;
+  if (bytesPerSec >= 1024 * 1024) {
+    speed = (bytesPerSec / (1024 * 1024)).toFixed(1) + " MB/s";
+  } else if (bytesPerSec >= 1024) {
+    speed = (bytesPerSec / 1024).toFixed(1) + " KB/s";
+  } else {
+    speed = Math.round(bytesPerSec) + " B/s";
+  }
+
+  // ETA in seconds, shown as ~Xs or ~Xm Ys for longer transfers
+  const etaSec = Math.max(0, Math.ceil(bytesRemaining / bytesPerSec));
+  const eta =
+    etaSec >= 60
+      ? Math.floor(etaSec / 60) + "m " + (etaSec % 60) + "s"
+      : etaSec + "s";
+
+  return speed + " • ~" + eta + " remaining";
+};
+
 // How often (in milliseconds) each side asks the server "any new messages?".
 // This replaces Socket.io, which used to push messages to us instantly.
 const POLL_INTERVAL_MS = 1200;
@@ -48,6 +77,11 @@ export default function Home() {
   const [sendProgress, setSendProgress] = useState(0);
   // Progress (0-100) of receiving a file
   const [receiveProgress, setReceiveProgress] = useState(0);
+  // Live "speed / ETA" text shown under the send/receive progress bars
+  const [sendSpeedText, setSendSpeedText] = useState("");
+  const [receiveSpeedText, setReceiveSpeedText] = useState("");
+  // Whether the incoming file is larger than the ~2GB safety threshold
+  const [largeFileWarning, setLargeFileWarning] = useState(false);
   // Name of the file currently being sent (shown in the progress bar)
   const [sendingFileName, setSendingFileName] = useState("");
   // Completed incoming file (name + object URL) once fully received
@@ -77,6 +111,12 @@ export default function Home() {
   const incomingChunksRef = useRef<ArrayBuffer[]>([]);
   const incomingBytesRef = useRef(0);
   const receivedChunksRef = useRef(0);
+
+  // Sampling points used to compute the live transfer speed (bytes/sec).
+  // We only update the speed text about once per second to avoid re-rendering
+  // the whole UI on every single file chunk.
+  const sendSpeedRef = useRef({ lastUpdate: 0, lastBytes: 0 });
+  const receiveSpeedRef = useRef({ lastUpdate: 0, lastBytes: 0 });
 
   // ============================================================
   // SIGNALING VIA HTTP POLLING (replaces the old Socket.io events)
@@ -156,7 +196,7 @@ export default function Home() {
     return pc;
   };
 
-// Wire up a data channel's event listeners (used by both sides)
+  // Wire up a data channel's event listeners (used by both sides)
   const setupDataChannel = (channel: RTCDataChannel) => {
     dataChannelRef.current = channel;
 
@@ -190,9 +230,18 @@ export default function Home() {
                 size: parsed.size as number,
                 mime: parsed.mime as string,
               };
+              // Warn (but still attempt) for very large incoming files.
+              // ~2GB is roughly where in-memory Blob assembly becomes
+              // unreliable in a browser tab.
+              setLargeFileWarning(
+                (parsed.size as number) > 2 * 1024 * 1024 * 1024,
+              );
               incomingChunksRef.current = [];
               incomingBytesRef.current = 0;
               receivedChunksRef.current = 0;
+              // Reset the live speed tracker for the new transfer
+              receiveSpeedRef.current = { lastUpdate: 0, lastBytes: 0 };
+              setReceiveSpeedText("");
               setIncomingFile(null);
               setReceiveProgress(0);
               return;
@@ -212,6 +261,9 @@ export default function Home() {
                 });
                 setReceiveProgress(100);
               }
+              // Transfer finished: clear the live speed/warning text
+              setReceiveSpeedText("");
+              setLargeFileWarning(false);
               return;
             }
           } catch {
@@ -229,12 +281,30 @@ export default function Home() {
           incomingBytesRef.current += chunk.byteLength;
           receivedChunksRef.current++;
 
+          // Refresh the live speed text about once per second, not every
+          // chunk, so we don't re-render the whole UI for a big file.
+          const now = Date.now();
+          if (now - receiveSpeedRef.current.lastUpdate >= 1000) {
+            const dtSec = (now - receiveSpeedRef.current.lastUpdate) / 1000;
+            const speed =
+              (incomingBytesRef.current - receiveSpeedRef.current.lastBytes) /
+              dtSec;
+            receiveSpeedRef.current.lastBytes = incomingBytesRef.current;
+            receiveSpeedRef.current.lastUpdate = now;
+            const remaining =
+              incomingMetaRef.current.size - incomingBytesRef.current;
+            setReceiveSpeedText(formatSpeedEta(speed, remaining));
+          }
+
           // Update the progress bar only every 10 chunks (not every chunk)
           // to avoid re-rendering too often while receiving a large file.
           if (receivedChunksRef.current % 10 === 0) {
             const total = incomingMetaRef.current.size;
             setReceiveProgress(
-              Math.min(100, Math.floor((incomingBytesRef.current / total) * 100))
+              Math.min(
+                100,
+                Math.floor((incomingBytesRef.current / total) * 100),
+              ),
             );
           }
         }
@@ -296,7 +366,7 @@ export default function Home() {
     }
   };
 
-// Runs when we know the other peer is in the room.
+  // Runs when we know the other peer is in the room.
   // (This used to be the "peer-joined" socket event handler. Now the creator
   // gets a { type: "peer-joined" } message from polling, and the joiner calls
   // this directly after a successful join-room request.)
@@ -310,7 +380,7 @@ export default function Home() {
     setStatusMessage(
       flowRef.current === "receiving"
         ? "Connected! (paired with sender)"
-        : "Connected! (peer joined)"
+        : "Connected! (peer joined)",
     );
 
     if (flowRef.current === "sending") {
@@ -330,7 +400,7 @@ export default function Home() {
 
     try {
       const res = await fetch(
-        `/api/signal?code=${encodeURIComponent(code)}&role=${myRole()}`
+        `/api/signal?code=${encodeURIComponent(code)}&role=${myRole()}`,
       );
       if (!res.ok) return; // e.g. bad request - just try again on the next tick
 
@@ -434,7 +504,7 @@ export default function Home() {
     }
   };
 
-// Send a text message through the data channel for testing
+  // Send a text message through the data channel for testing
   const handleSendMessage = () => {
     // Only send if the direct channel is actually open
     if (dataChannelRef.current?.readyState === "open" && messageInput.trim()) {
@@ -444,12 +514,20 @@ export default function Home() {
   };
 
   // Send a file over the data channel. Files are too big to send in one go,
-  // so we break them into 16KB chunks and send them one at a time.
+  // so we break them into 64KB chunks and send them one at a time.
   // This is the trickiest part, so read the comments carefully:
   // 1. Send metadata describing the file.
-  // 2. Read + send 16KB slices until the whole file is sent.
+  // 2. Read + send 64KB slices until the whole file is sent.
   // 3. Send a "file-end" marker so the receiver knows it's complete.
-  const handleFileSend = (file: File | undefined) => {
+  //
+  // BACKPRESSURE: the browser queues each channel.send() into an internal
+  // buffer. If we send faster than the data channel can flush it, that buffer
+  // grows unbounded and can crash the tab on a large file. To prevent that,
+  // we check channel.bufferedAmount (bytes currently queued) before every
+  // send and *pause* until it drops below 1MB. We get woken up when it falls
+  // below the 512KB "low threshold" using the bufferedamountlow event - this
+  // is called "backpressure" (the channel pushes back when it's full).
+  const handleFileSend = async (file: File | undefined) => {
     if (!file) return;
     const channel = dataChannelRef.current;
     if (!channel || channel.readyState !== "open") return;
@@ -457,6 +535,11 @@ export default function Home() {
     // Remember what we're sending so the progress bar can show it
     setSendingFileName(file.name);
     setSendProgress(0);
+    setSendSpeedText("");
+
+    // Tell the channel: fire "bufferedamountlow" once the queued bytes drop
+    // below this. We wait on that event whenever the buffer gets too full.
+    channel.bufferedAmountLowThreshold = 512 * 1024; // 512KB
 
     // 1. Tell the other side about the file before sending any data
     channel.send(
@@ -465,24 +548,37 @@ export default function Home() {
         name: file.name,
         size: file.size,
         mime: file.type,
-      })
+      }),
     );
 
-    // 2. Read and send the file in 16KB slices
-    const CHUNK_SIZE = 16 * 1024; // 16 kilobytes
+    // 2. Read and send the file in 64KB slices
+    const CHUNK_SIZE = 64 * 1024; // 64KB chunks balance throughput and size
     let offset = 0; // how many bytes we have read so far
     let chunksSent = 0; // used to update the progress bar less often
 
-    const sendNextChunk = () => {
-      // Once we've passed the end of the file, we're done
+    // Resolve once the channel's queue drains below 1MB (backpressure).
+    const waitForDrain = (): Promise<void> => {
+      // If the buffer is already small enough, send the next chunk right away
+      if (channel.bufferedAmount < 1024 * 1024) return Promise.resolve();
+      // Otherwise pause and wait until the browser reports the buffer is low
+      return new Promise((resolve) => {
+        channel.onbufferedamountlow = () => resolve();
+      });
+    };
+
+    const sendNextChunk = async () => {
+      // Once we've read the whole file we're done
       if (offset >= file.size) {
         // 3. Let the receiver know there is no more data coming
         channel.send(JSON.stringify({ type: "file-end" }));
         setSendProgress(100);
+        setSendSpeedText("");
         return;
       }
 
-      // Take the next 16KB slice of the file
+      await waitForDrain(); // pause if the channel's queue is too full
+
+      // Take the next 64KB slice of the file
       const slice = file.slice(offset, offset + CHUNK_SIZE);
       const reader = new FileReader();
 
@@ -492,11 +588,21 @@ export default function Home() {
         offset += slice.size;
         chunksSent++;
 
+        // Refresh the live speed text about once per second, not every chunk
+        const now = Date.now();
+        if (now - sendSpeedRef.current.lastUpdate >= 1000) {
+          const dtSec = (now - sendSpeedRef.current.lastUpdate) / 1000;
+          const speed = (offset - sendSpeedRef.current.lastBytes) / dtSec;
+          sendSpeedRef.current.lastBytes = offset;
+          sendSpeedRef.current.lastUpdate = now;
+          setSendSpeedText(formatSpeedEta(speed, file.size - offset));
+        }
+
         // Refresh the progress bar only every 10 chunks (not every chunk)
         // to avoid re-rendering too often for a large file.
         if (chunksSent % 10 === 0) {
           setSendProgress(
-            Math.min(100, Math.floor((offset / file.size) * 100))
+            Math.min(100, Math.floor((offset / file.size) * 100)),
           );
         }
 
@@ -539,6 +645,9 @@ export default function Home() {
     setDataChannelOpen(false);
     setSendProgress(0);
     setReceiveProgress(0);
+    setSendSpeedText("");
+    setReceiveSpeedText("");
+    setLargeFileWarning(false);
     setSendingFileName("");
     setIncomingFile(null);
     setIsDragging(false);
@@ -554,7 +663,7 @@ export default function Home() {
     peerConnectionRef.current = null;
   };
 
-return (
+  return (
     <main className="flex min-h-screen flex-col items-center justify-center bg-zinc-50 p-6 font-sans dark:bg-black">
       <div className="w-full max-w-md rounded-2xl bg-white p-8 shadow-lg dark:bg-zinc-900">
         {/* Heading, always visible */}
@@ -637,7 +746,7 @@ return (
           </div>
         )}
 
-{/* CONNECTED screen: success + messenger + file transfer + reset */}
+        {/* CONNECTED screen: success + messenger + file transfer + reset */}
         {screen === "connected" && (
           <div className="flex flex-col items-center gap-4 text-center">
             <div className="flex h-14 w-14 items-center justify-center rounded-full bg-green-100 text-3xl dark:bg-green-900">
@@ -683,7 +792,7 @@ return (
               </div>
             )}
 
-{/* File transfer section: appears once the P2P data channel is open */}
+            {/* File transfer section: appears once the P2P data channel is open */}
             {dataChannelOpen && (
               <div className="flex w-full flex-col gap-3 border-t border-zinc-200 pt-4 dark:border-zinc-700">
                 {/* Drag-and-drop zone. Clicking it opens the hidden file picker.
@@ -718,6 +827,11 @@ return (
                     <p className="text-xs text-zinc-500 dark:text-zinc-400">
                       Sending {sendingFileName}: {sendProgress}%
                     </p>
+                    {sendSpeedText && (
+                      <p className="text-xs text-zinc-500 dark:text-zinc-400">
+                        {sendSpeedText}
+                      </p>
+                    )}
                     <div className="h-2 w-full overflow-hidden rounded-full bg-zinc-200 dark:bg-zinc-700">
                       <div
                         className="h-2 rounded-full bg-indigo-600 transition-all"
@@ -733,6 +847,16 @@ return (
                     <p className="text-xs text-zinc-500 dark:text-zinc-400">
                       Receiving file: {receiveProgress}%
                     </p>
+                    {largeFileWarning && (
+                      <p className="text-xs text-amber-600">
+                        Files over 2GB may not work reliably in this version
+                      </p>
+                    )}
+                    {receiveSpeedText && (
+                      <p className="text-xs text-zinc-500 dark:text-zinc-400">
+                        {receiveSpeedText}
+                      </p>
+                    )}
                     <div className="h-2 w-full overflow-hidden rounded-full bg-zinc-200 dark:bg-zinc-700">
                       <div
                         className="h-2 rounded-full bg-green-600 transition-all"
@@ -766,9 +890,3 @@ return (
     </main>
   );
 }
-
-
-
-
-
-
