@@ -108,11 +108,41 @@ export default function Home() {
     }).catch((err) => console.error("Error sending signal", err));
   };
 
-  // Create a fresh RTCPeerConnection using a free STUN server.
-  // STUN helps the two browsers discover each other over the internet.
+  // Create a fresh RTCPeerConnection using a free STUN server plus
+  // Metered.ca TURN servers.
+  // STUN lets the two browsers find each other directly (peer-to-peer).
+  // TURN is the fallback used when that direct connection is impossible
+  // (e.g. strict corporate or mobile networks block P2P) - the traffic is
+  // then relayed through Metered's servers instead.
+  // NOTE: NEXT_PUBLIC_TURN_USERNAME and NEXT_PUBLIC_TURN_PASSWORD must also
+  // be set in your Vercel project settings for this to work in production,
+  // not just in your local .env.local file.
   const setupPeerConnection = () => {
     const pc = new RTCPeerConnection({
-      iceServers: [{ urls: "stun:stun.l.google.com:19302" }],
+      iceServers: [
+        { urls: "stun:stun.l.google.com:19302" },
+        { urls: "stun:stun.relay.metered.ca:80" },
+        {
+          urls: "turn:global.relay.metered.ca:80",
+          username: process.env.NEXT_PUBLIC_TURN_USERNAME,
+          credential: process.env.NEXT_PUBLIC_TURN_PASSWORD,
+        },
+        {
+          urls: "turn:global.relay.metered.ca:80?transport=tcp",
+          username: process.env.NEXT_PUBLIC_TURN_USERNAME,
+          credential: process.env.NEXT_PUBLIC_TURN_PASSWORD,
+        },
+        {
+          urls: "turn:global.relay.metered.ca:443",
+          username: process.env.NEXT_PUBLIC_TURN_USERNAME,
+          credential: process.env.NEXT_PUBLIC_TURN_PASSWORD,
+        },
+        {
+          urls: "turns:global.relay.metered.ca:443?transport=tcp",
+          username: process.env.NEXT_PUBLIC_TURN_USERNAME,
+          credential: process.env.NEXT_PUBLIC_TURN_PASSWORD,
+        },
+      ],
     });
 
     // Whenever we generate an ICE candidate, relay it to the other peer
