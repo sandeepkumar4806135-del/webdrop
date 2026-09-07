@@ -15,8 +15,9 @@ const inter = Inter({
 });
 
 export const metadata: Metadata = {
-  title: "WebDrop",
-  description: "Peer-to-peer file transfers between devices",
+  title: "WebDrop – Instant Cross-Platform File Transfer",
+  description:
+    "Transfer files and text instantly between any devices. No login, no cable, no shared WiFi needed. Open WebDrop on two devices and send files peer-to-peer.",
 };
 
 export default function RootLayout({ children }: LayoutProps<"/">) {
