@@ -748,25 +748,49 @@ export default function Home() {
   };
 
   return (
-    <main className="flex min-h-screen flex-col items-center justify-center bg-zinc-50 p-6 font-sans dark:bg-black">
-      <div className="w-full max-w-md rounded-2xl bg-white p-8 shadow-lg dark:bg-zinc-900">
+    <main className="flex min-h-screen flex-col items-center justify-center bg-[#0A0E1A] p-6">
+      <div className="w-full max-w-md rounded-xl border border-[#232B45] bg-[#12172A] p-8 shadow-2xl">
         {/* Heading, always visible */}
-        <h1 className="mb-6 text-center text-2xl font-bold text-zinc-900 dark:text-zinc-50">
-          WebDrop
-        </h1>
+        <div className="mb-8 flex items-center justify-center gap-2.5">
+          <svg
+            width="28"
+            height="28"
+            viewBox="0 0 28 28"
+            fill="none"
+            className="shrink-0"
+            aria-hidden="true"
+          >
+            <path
+              d="M6 14a8 8 0 0 1 16 0"
+              stroke="#5B8DEF"
+              strokeWidth="2.5"
+              strokeLinecap="round"
+            />
+            <path
+              d="M10 14a4 4 0 0 1 8 0"
+              stroke="#5B8DEF"
+              strokeWidth="2.5"
+              strokeLinecap="round"
+            />
+            <circle cx="14" cy="14" r="2" fill="#5B8DEF" />
+          </svg>
+          <h1 className="font-[family-name:var(--font-space-grotesk)] text-2xl font-bold tracking-tight text-[#E8ECF5]">
+            WebDrop
+          </h1>
+        </div>
 
         {/* START screen: choose to send or receive */}
         {screen === "start" && (
           <div className="flex flex-col gap-4">
             <button
               onClick={handleSend}
-              className="w-full rounded-lg bg-indigo-600 py-3 text-lg font-semibold text-white transition-colors hover:bg-indigo-700"
+              className="w-full rounded-lg bg-[#5B8DEF] py-3 text-lg font-semibold text-white transition-colors hover:bg-[#4A7DE0] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[#5B8DEF] focus-visible:ring-offset-2 focus-visible:ring-offset-[#12172A]"
             >
               Send
             </button>
             <button
               onClick={() => setScreen("receiving")}
-              className="w-full rounded-lg border border-zinc-300 bg-white py-3 text-lg font-semibold text-zinc-700 transition-colors hover:bg-zinc-100 dark:border-zinc-600 dark:bg-zinc-800 dark:text-zinc-200 dark:hover:bg-zinc-700"
+              className="w-full rounded-lg border border-[#232B45] bg-transparent py-3 text-lg font-semibold text-[#E8ECF5] transition-colors hover:bg-[#1A2040] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[#5B8DEF] focus-visible:ring-offset-2 focus-visible:ring-offset-[#12172A]"
             >
               Receive
             </button>
@@ -776,23 +800,28 @@ export default function Home() {
         {/* SENDING screen: show the code, QR code, and status */}
         {screen === "sending" && (
           <div className="flex flex-col items-center gap-4 text-center">
-            <p className="text-sm text-zinc-500 dark:text-zinc-400">
+            <p className="text-sm text-[#8B93A7]">
               Share this code with the other device:
             </p>
-            {/* The 4-digit code shown large */}
-            <div className="text-6xl font-bold tracking-widest text-zinc-900 dark:text-zinc-50">
+            {/* The 4-digit code shown large — Space Grotesk, boldest element */}
+            <div
+              className={`text-6xl font-bold tracking-widest text-[#E8ECF5] ${dataChannelOpen ? "" : "pulse-glow rounded-xl"}`}
+              style={{ fontFamily: 'var(--font-space-grotesk)', padding: '0.25rem 0.5rem' }}
+            >
               {code}
             </div>
             {/* The QR image of the code */}
             {qrDataUrl && (
-              <img
-                src={qrDataUrl}
-                alt="QR code"
-                className="h-48 w-48 rounded-lg border border-zinc-200 dark:border-zinc-700"
-              />
+              <div className={`rounded-xl border border-[#232B45] bg-[#0A0E1A] p-4 ${dataChannelOpen ? "" : "pulse-glow"}`}>
+                <img
+                  src={qrDataUrl}
+                  alt="QR code"
+                  className="h-48 w-48 rounded-lg"
+                />
+              </div>
             )}
-            {/* Current status message */}
-            <p className="mt-2 text-base text-zinc-600 dark:text-zinc-400">
+            {/* Current status message — mint green once connected */}
+            <p className={`mt-2 text-base font-medium ${dataChannelOpen ? "text-[#34D399]" : "text-[#8B93A7]"}`}>
               {statusMessage}
             </p>
           </div>
@@ -801,7 +830,7 @@ export default function Home() {
         {/* RECEIVING screen: type a code and connect */}
         {screen === "receiving" && (
           <div className="flex flex-col gap-4">
-            <p className="text-sm text-zinc-500 dark:text-zinc-400">
+            <p className="text-sm text-[#8B93A7]">
               Enter the 4-digit code shown on the sender&apos;s device:
             </p>
             <div className="flex gap-2">
@@ -812,18 +841,18 @@ export default function Home() {
                 value={inputCode}
                 onChange={(e) => setInputCode(e.target.value)}
                 placeholder="3841"
-                className="w-full flex-1 rounded-lg border border-zinc-300 bg-white px-4 py-3 text-center text-2xl font-semibold tracking-widest text-zinc-900 outline-none focus:border-indigo-500 dark:border-zinc-600 dark:bg-zinc-800 dark:text-zinc-50"
+                className="w-full flex-1 rounded-lg border border-[#232B45] bg-[#0A0E1A] px-4 py-3 text-center font-[family-name:var(--font-space-grotesk)] text-2xl font-semibold tracking-widest text-[#E8ECF5] outline-none placeholder:text-[#8B93A7]/50 focus:ring-2 focus:ring-[#5B8DEF]"
               />
               <button
                 onClick={handleConnect}
-                className="rounded-lg bg-indigo-600 px-6 py-3 font-semibold text-white transition-colors hover:bg-indigo-700"
+                className="rounded-lg bg-[#5B8DEF] px-6 py-3 font-semibold text-white transition-colors hover:bg-[#4A7DE0] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[#5B8DEF] focus-visible:ring-offset-2 focus-visible:ring-offset-[#12172A]"
               >
                 Connect
               </button>
             </div>
             {/* Show an error if the code was not found */}
             {errorMessage && (
-              <p className="text-center text-sm text-red-600 dark:text-red-400">
+              <p className="text-center text-sm text-red-400">
                 {errorMessage}
               </p>
             )}
@@ -833,15 +862,24 @@ export default function Home() {
         {/* CONNECTED screen: success + messenger + file transfer + reset */}
         {screen === "connected" && (
           <div className="flex flex-col items-center gap-4 text-center">
-            <div className="flex h-14 w-14 items-center justify-center rounded-full bg-green-100 text-3xl dark:bg-green-900">
-              ✓
+            {/* Success indicator — mint green accent */}
+            <div className="flex h-14 w-14 items-center justify-center rounded-full bg-[#34D399]/10 ring-2 ring-[#34D399]/30">
+              <svg width="28" height="28" viewBox="0 0 24 24" fill="none" aria-hidden="true">
+                <path
+                  d="M4 12.5l5 5L20 7"
+                  stroke="#34D399"
+                  strokeWidth="2.5"
+                  strokeLinecap="round"
+                  strokeLinejoin="round"
+                />
+              </svg>
             </div>
-            <p className="text-lg font-semibold text-zinc-900 dark:text-zinc-50">
+            <p className="text-lg font-semibold text-[#E8ECF5]">
               {statusMessage}
             </p>
             {/* Test messenger: appears once the P2P data channel is open */}
             {dataChannelOpen && (
-              <div className="flex w-full flex-col gap-3 border-t border-zinc-200 pt-4 dark:border-zinc-700">
+              <div className="flex w-full flex-col gap-3 border-t border-[#232B45] pt-4">
                 <div className="flex gap-2">
                   <input
                     type="text"
@@ -851,22 +889,22 @@ export default function Home() {
                       if (e.key === "Enter") handleSendMessage();
                     }}
                     placeholder="Type a message"
-                    className="w-full flex-1 rounded-lg border border-zinc-300 bg-white px-3 py-2 text-zinc-900 outline-none focus:border-indigo-500 dark:border-zinc-600 dark:bg-zinc-800 dark:text-zinc-50"
+                    className="w-full flex-1 rounded-lg border border-[#232B45] bg-[#0A0E1A] px-3 py-2 text-[#E8ECF5] outline-none placeholder:text-[#8B93A7]/50 focus:ring-2 focus:ring-[#5B8DEF]"
                   />
                   <button
                     onClick={handleSendMessage}
-                    className="rounded-lg bg-indigo-600 px-4 py-2 font-semibold text-white transition-colors hover:bg-indigo-700"
+                    className="rounded-lg bg-[#5B8DEF] px-4 py-2 font-semibold text-white transition-colors hover:bg-[#4A7DE0] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[#5B8DEF] focus-visible:ring-offset-2 focus-visible:ring-offset-[#12172A]"
                   >
                     Send Message
                   </button>
                 </div>
                 {/* Show messages received from the other peer */}
                 {messages.length > 0 && (
-                  <ul className="flex flex-col gap-2 text-left text-sm text-zinc-700 dark:text-zinc-300">
+                  <ul className="flex flex-col gap-2 text-left text-sm text-[#8B93A7]">
                     {messages.map((msg, i) => (
                       <li
                         key={i}
-                        className="break-words rounded-lg bg-zinc-100 px-3 py-2 dark:bg-zinc-800"
+                        className="break-words rounded-lg bg-[#0A0E1A] px-3 py-2 text-[#E8ECF5]"
                       >
                         {msg}
                       </li>
@@ -878,7 +916,7 @@ export default function Home() {
 
             {/* File transfer section: appears once the P2P data channel is open */}
             {dataChannelOpen && (
-              <div className="flex w-full flex-col gap-3 border-t border-zinc-200 pt-4 dark:border-zinc-700">
+              <div className="flex w-full flex-col gap-3 border-t border-[#232B45] pt-4">
                 {/* Drag-and-drop zone. Clicking it opens the hidden file picker.
                     We use a <label> so that clicking the box triggers the input. */}
                 <label
@@ -890,11 +928,11 @@ export default function Home() {
                   onDrop={handleDrop}
                   className={`flex min-h-[90px] cursor-pointer flex-col items-center justify-center rounded-lg border-2 border-dashed px-4 text-center text-sm transition-colors ${
                     isDragging
-                      ? "border-indigo-500 bg-indigo-50 dark:bg-indigo-900/30"
-                      : "border-zinc-300 hover:border-indigo-400 dark:border-zinc-600"
+                      ? "border-[#5B8DEF] bg-[#5B8DEF]/10"
+                      : "border-[#232B45] hover:border-[#5B8DEF]/50"
                   }`}
                 >
-                  <span className="text-zinc-500 dark:text-zinc-400">
+                  <span className="text-[#8B93A7]">
                     Drag &amp; drop a file here, or click to select
                   </span>
                   {/* Hidden file input, opened when the drop zone is clicked */}
@@ -908,45 +946,49 @@ export default function Home() {
                 {/* Progress bar while sending a file */}
                 {sendingFileName && (
                   <div className="flex flex-col gap-1">
-                    <p className="text-xs text-zinc-500 dark:text-zinc-400">
-                      Sending {sendingFileName}: {sendProgress}%
-                    </p>
-                    {sendSpeedText && (
-                      <p className="text-xs text-zinc-500 dark:text-zinc-400">
-                        {sendSpeedText}
+                    <div className="flex items-baseline justify-between">
+                      <p className="text-xs text-[#8B93A7]">
+                        Sending {sendingFileName}
                       </p>
-                    )}
-                    <div className="h-2 w-full overflow-hidden rounded-full bg-zinc-200 dark:bg-zinc-700">
+                      <p className="text-xs font-medium text-[#E8ECF5]">
+                        {sendProgress}%
+                      </p>
+                    </div>
+                    <div className="h-2 w-full overflow-hidden rounded-full bg-[#232B45]">
                       <div
-                        className="h-2 rounded-full bg-indigo-600 transition-all"
+                        className="h-2 rounded-full bg-[#5B8DEF] transition-all"
                         style={{ width: `${sendProgress}%` }}
                       />
                     </div>
+                    {sendSpeedText && (
+                      <p className="text-xs text-[#8B93A7]">{sendSpeedText}</p>
+                    )}
                   </div>
                 )}
 
                 {/* Progress bar while receiving a file */}
                 {receiveProgress > 0 && receiveProgress < 100 && (
                   <div className="flex flex-col gap-1">
-                    <p className="text-xs text-zinc-500 dark:text-zinc-400">
-                      Receiving file: {receiveProgress}%
-                    </p>
+                    <div className="flex items-baseline justify-between">
+                      <p className="text-xs text-[#8B93A7]">Receiving file</p>
+                      <p className="text-xs font-medium text-[#E8ECF5]">
+                        {receiveProgress}%
+                      </p>
+                    </div>
                     {largeFileWarning && (
-                      <p className="text-xs text-amber-600">
+                      <p className="text-xs text-amber-400">
                         Files over 2GB may not work reliably in this version
                       </p>
                     )}
-                    {receiveSpeedText && (
-                      <p className="text-xs text-zinc-500 dark:text-zinc-400">
-                        {receiveSpeedText}
-                      </p>
-                    )}
-                    <div className="h-2 w-full overflow-hidden rounded-full bg-zinc-200 dark:bg-zinc-700">
+                    <div className="h-2 w-full overflow-hidden rounded-full bg-[#232B45]">
                       <div
-                        className="h-2 rounded-full bg-green-600 transition-all"
+                        className="h-2 rounded-full bg-[#5B8DEF] transition-all"
                         style={{ width: `${receiveProgress}%` }}
                       />
                     </div>
+                    {receiveSpeedText && (
+                      <p className="text-xs text-[#8B93A7]">{receiveSpeedText}</p>
+                    )}
                   </div>
                 )}
 
@@ -955,7 +997,7 @@ export default function Home() {
                   <a
                     href={incomingFile.url}
                     download={incomingFile.name}
-                    className="rounded-lg bg-green-600 px-4 py-2 text-sm font-semibold text-white transition-colors hover:bg-green-700"
+                    className="rounded-lg bg-[#34D399] px-4 py-2 text-sm font-semibold text-[#0A0E1A] transition-colors hover:bg-[#2BC08A] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[#34D399] focus-visible:ring-offset-2 focus-visible:ring-offset-[#12172A]"
                   >
                     Download {incomingFile.name}
                   </a>
@@ -966,12 +1008,14 @@ export default function Home() {
                 itself after 30s of inactivity. The Cancel link stops it, and
                 any new message/file resets the 30s window. */}
             {countdown > 0 && (
-              <p className="text-xs text-zinc-500 dark:text-zinc-400">
-                This session will close automatically in {countdown}s for
-                privacy.{" "}
+              <p className="flex items-center justify-between rounded-lg border border-[#232B45] bg-[#0A0E1A] px-3 py-2 text-xs text-[#8B93A7]">
+                <span>
+                  This session will close automatically in {countdown}s for
+                  privacy.
+                </span>
                 <button
                   onClick={cancelSelfDestruct}
-                  className="font-semibold text-indigo-600 underline dark:text-indigo-400"
+                  className="font-semibold text-[#5B8DEF] underline focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[#5B8DEF]"
                 >
                   Cancel
                 </button>
@@ -979,7 +1023,7 @@ export default function Home() {
             )}
             <button
               onClick={handleReset}
-              className="w-full rounded-lg border border-zinc-300 bg-white py-3 font-semibold text-zinc-700 transition-colors hover:bg-zinc-100 dark:border-zinc-600 dark:bg-zinc-800 dark:text-zinc-200 dark:hover:bg-zinc-700"
+              className="w-full rounded-lg border border-[#232B45] bg-transparent py-3 font-semibold text-[#8B93A7] transition-colors hover:bg-[#1A2040] hover:text-[#E8ECF5] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[#5B8DEF] focus-visible:ring-offset-2 focus-visible:ring-offset-[#12172A]"
             >
               Start over
             </button>
