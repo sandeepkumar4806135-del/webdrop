@@ -18,6 +18,9 @@ export const metadata: Metadata = {
   title: "WebDrop – Instant Cross-Platform File Transfer",
   description:
     "Transfer files and text instantly between any devices. No login, no cable, no shared WiFi needed. Open WebDrop on two devices and send files peer-to-peer.",
+  verification: {
+    google: "jnUO2aX2H2A0NbNGzrwY0qcdjpivKaEtAVwwItwJfeA",
+  },
 };
 
 export default function RootLayout({ children }: LayoutProps<"/">) {
