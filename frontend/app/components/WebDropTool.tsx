@@ -229,7 +229,7 @@ export function WebDropTool() {
             // Not valid JSON, fall through
           }
         }
-        setMessages((prev) => [...prev, text]);
+        setMessages((prev) => [...prev, "Peer: " + text]);
       } else {
         const chunk = event.data as ArrayBuffer;
         if (incomingMetaRef.current) {
@@ -406,7 +406,11 @@ export function WebDropTool() {
 
   const handleSendMessage = () => {
     if (dataChannelRef.current?.readyState === "open" && messageInput.trim()) {
-      dataChannelRef.current.send(messageInput);
+      const text = messageInput.trim();
+      dataChannelRef.current.send(text);
+      // Show our own sent message locally, labeled "You:" so both sides of
+      // the two-way chat can see what they typed (not just what they received).
+      setMessages((prev) => [...prev, "You: " + text]);
       setMessageInput("");
     }
   };
@@ -580,15 +584,14 @@ export function WebDropTool() {
           <p className="text-lg font-semibold text-[#E8ECF5]">{statusMessage}</p>
           {dataChannelOpen && (
             <div className="flex w-full flex-col gap-3 border-t border-[#232B45] pt-4">
-              {/* Text messaging is one-way: only the original SENDING device can
-                  type & send (isSender). The receiving side just reads the
-                  messages below. */}
-              {isSender && (
-                <div className="flex gap-2">
-                  <input type="text" value={messageInput} onChange={(e) => setMessageInput(e.target.value)} onKeyDown={(e) => { if (e.key === "Enter") handleSendMessage(); }} placeholder="Type a message" className="w-full flex-1 rounded-lg border border-[#232B45] bg-[#0A0E1A] px-3 py-2 text-[#E8ECF5] outline-none placeholder:text-[#8B93A7]/50 focus:ring-2 focus:ring-[#5B8DEF]" />
-                  <button onClick={handleSendMessage} className="rounded-lg bg-[#5B8DEF] px-4 py-2 font-semibold text-white transition-colors hover:bg-[#4A7DE0] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[#5B8DEF] focus-visible:ring-offset-2 focus-visible:ring-offset-[#12172A]">Send Message</button>
-                </div>
-              )}
+              {/* Text messenger is TWO-way: both the sending and receiving
+                  devices can type & send once dataChannelOpen is true. The
+                  messages list below shows messages from both sides ("You:"
+                  for your own, "Peer:" for the remote device's). */}
+              <div className="flex gap-2">
+                <input type="text" value={messageInput} onChange={(e) => setMessageInput(e.target.value)} onKeyDown={(e) => { if (e.key === "Enter") handleSendMessage(); }} placeholder="Type a message" className="w-full flex-1 rounded-lg border border-[#232B45] bg-[#0A0E1A] px-3 py-2 text-[#E8ECF5] outline-none placeholder:text-[#8B93A7]/50 focus:ring-2 focus:ring-[#5B8DEF]" />
+                <button onClick={handleSendMessage} className="rounded-lg bg-[#5B8DEF] px-4 py-2 font-semibold text-white transition-colors hover:bg-[#4A7DE0] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[#5B8DEF] focus-visible:ring-offset-2 focus-visible:ring-offset-[#12172A]">Send Message</button>
+              </div>
               {messages.length > 0 && (
                 <ul className="flex flex-col gap-2 text-left text-sm text-[#8B93A7]">
                   {messages.map((msg, i) => (<li key={i} className="break-words rounded-lg bg-[#0A0E1A] px-3 py-2 text-[#E8ECF5]">{msg}</li>))}
