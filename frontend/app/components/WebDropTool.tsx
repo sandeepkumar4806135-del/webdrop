@@ -619,12 +619,10 @@ export function WebDropTool() {
                   </svg>
                   <span className="text-xs font-medium text-[#E8ECF5]">Files</span>
                   <span className="text-[10px] text-[#8B93A7]/70">or drag &amp; drop here</span>
-                  {/* The accept attribute restricts the click-to-browse picker
-                      to common document types (filters out photos/videos). Note:
-                      drag-and-drop can't be filtered by file type the same way —
-                      that's a browser limitation. The picker is the main path,
-                      so this accept is the key fix here. */}
-                  <input type="file" accept=".pdf,.doc,.docx,.xls,.xlsx,.ppt,.pptx,.txt,.zip,.rar,.csv,application/pdf,application/msword,application/vnd.openxmlformats-officedocument.wordprocessingml.document,application/vnd.ms-excel,application/vnd.openxmlformats-officedocument.spreadsheetml.sheet,application/zip,text/plain,text/csv" className="hidden" onChange={handleFileInputChange} />
+                  {/* Files opens the general file browser with NO type
+                      restriction — any file can be picked. The restrictive
+                      Photo/Video and Camera options handle media separately. */}
+                  <input type="file" className="hidden" onChange={handleFileInputChange} />
                 </label>
 
                 {/* Photo & Video — opens the gallery/photo picker filtered to media */}
