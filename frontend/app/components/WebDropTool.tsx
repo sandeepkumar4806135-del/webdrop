@@ -43,6 +43,11 @@ const POLL_INTERVAL_MS = 1200;
 
 export function WebDropTool() {
   const [screen, setScreen] = useState<Screen>("start");
+  // Whether THIS device is the one that originally clicked "Send" (the
+  // offer-creator / sending role). Mirrors flowRef as STATE because React's
+  // render path can't safely read a ref's .current during render. Controls
+  // whether the one-way send controls (text box + Files/Photo/Camera) show.
+  const [isSender, setIsSender] = useState(false);
   const [code, setCode] = useState("");
   const [qrDataUrl, setQrDataUrl] = useState("");
   const [statusMessage, setStatusMessage] = useState("");
@@ -354,6 +359,7 @@ export function WebDropTool() {
   }, [stopPolling]);
   const handleSend = async () => {
     flowRef.current = "sending";
+    setIsSender(true);
     try {
       const res = await fetch("/api/create-room", { method: "POST" });
       if (!res.ok)
@@ -377,6 +383,7 @@ export function WebDropTool() {
       return;
     }
     flowRef.current = "receiving";
+    setIsSender(false);
     codeRef.current = inputCode.trim();
     try {
       const res = await fetch("/api/join-room", {
@@ -498,6 +505,7 @@ export function WebDropTool() {
     setCountdown(0);
     transferCompletedRef.current = false;
     codeRef.current = "";
+    setIsSender(false);
     setScreen("start");
     setCode("");
     setQrDataUrl("");
@@ -572,10 +580,15 @@ export function WebDropTool() {
           <p className="text-lg font-semibold text-[#E8ECF5]">{statusMessage}</p>
           {dataChannelOpen && (
             <div className="flex w-full flex-col gap-3 border-t border-[#232B45] pt-4">
-              <div className="flex gap-2">
-                <input type="text" value={messageInput} onChange={(e) => setMessageInput(e.target.value)} onKeyDown={(e) => { if (e.key === "Enter") handleSendMessage(); }} placeholder="Type a message" className="w-full flex-1 rounded-lg border border-[#232B45] bg-[#0A0E1A] px-3 py-2 text-[#E8ECF5] outline-none placeholder:text-[#8B93A7]/50 focus:ring-2 focus:ring-[#5B8DEF]" />
-                <button onClick={handleSendMessage} className="rounded-lg bg-[#5B8DEF] px-4 py-2 font-semibold text-white transition-colors hover:bg-[#4A7DE0] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[#5B8DEF] focus-visible:ring-offset-2 focus-visible:ring-offset-[#12172A]">Send Message</button>
-              </div>
+              {/* Text messaging is one-way: only the original SENDING device can
+                  type & send (isSender). The receiving side just reads the
+                  messages below. */}
+              {isSender && (
+                <div className="flex gap-2">
+                  <input type="text" value={messageInput} onChange={(e) => setMessageInput(e.target.value)} onKeyDown={(e) => { if (e.key === "Enter") handleSendMessage(); }} placeholder="Type a message" className="w-full flex-1 rounded-lg border border-[#232B45] bg-[#0A0E1A] px-3 py-2 text-[#E8ECF5] outline-none placeholder:text-[#8B93A7]/50 focus:ring-2 focus:ring-[#5B8DEF]" />
+                  <button onClick={handleSendMessage} className="rounded-lg bg-[#5B8DEF] px-4 py-2 font-semibold text-white transition-colors hover:bg-[#4A7DE0] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[#5B8DEF] focus-visible:ring-offset-2 focus-visible:ring-offset-[#12172A]">Send Message</button>
+                </div>
+              )}
               {messages.length > 0 && (
                 <ul className="flex flex-col gap-2 text-left text-sm text-[#8B93A7]">
                   {messages.map((msg, i) => (<li key={i} className="break-words rounded-lg bg-[#0A0E1A] px-3 py-2 text-[#E8ECF5]">{msg}</li>))}
@@ -585,10 +598,64 @@ export function WebDropTool() {
           )}
           {dataChannelOpen && (
             <div className="flex w-full flex-col gap-3 border-t border-[#232B45] pt-4">
-              <label onDragOver={(e) => { e.preventDefault(); setIsDragging(true); }} onDragLeave={() => setIsDragging(false)} onDrop={handleDrop} className={`flex min-h-[90px] cursor-pointer flex-col items-center justify-center rounded-lg border-2 border-dashed px-4 text-center text-sm transition-colors ${isDragging ? "border-[#5B8DEF] bg-[#5B8DEF]/10" : "border-[#232B45] hover:border-[#5B8DEF]/50"}`}>
-                <span className="text-[#8B93A7]">Drag &amp; drop a file here, or click to select</span>
-                <input type="file" className="hidden" onChange={handleFileInputChange} />
-              </label>
+              {/* SEND OPTIONS — one-way: only the original SENDING device sees
+                  these controls (isSender); the receiving device has no way to
+                  send files back. All three inputs reuse the same handleFileSend
+                  pipeline (via handleFileInputChange) — no duplication of the
+                  chunking/backpressure/progress logic. */}
+              {isSender && (
+              <div className="grid grid-cols-1 gap-2 sm:grid-cols-3">
+                {/* Files — also stays the drag-and-drop target (as before) */}
+                <label
+                  onDragOver={(e) => { e.preventDefault(); setIsDragging(true); }}
+                  onDragLeave={() => setIsDragging(false)}
+                  onDrop={handleDrop}
+                  className={`flex cursor-pointer flex-col items-center justify-center gap-1.5 rounded-lg border px-2 py-3 text-center transition-colors ${isDragging ? "border-[#5B8DEF] bg-[#5B8DEF]/10" : "border-[#232B45] hover:border-[#5B8DEF]/50 hover:bg-[#1A2040]"}`}
+                >
+                  <svg width="20" height="20" viewBox="0 0 24 24" fill="none" aria-hidden="true">
+                    <path d="M6 3h9l5 5v13H6z" stroke="#5B8DEF" strokeWidth="2" strokeLinejoin="round" />
+                    <path d="M14 3v6h6" stroke="#5B8DEF" strokeWidth="2" strokeLinejoin="round" />
+                    <path d="M9 12h6M9 16h6" stroke="#5B8DEF" strokeWidth="2" strokeLinecap="round" />
+                  </svg>
+                  <span className="text-xs font-medium text-[#E8ECF5]">Files</span>
+                  <span className="text-[10px] text-[#8B93A7]/70">or drag &amp; drop here</span>
+                  {/* The accept attribute restricts the click-to-browse picker
+                      to common document types (filters out photos/videos). Note:
+                      drag-and-drop can't be filtered by file type the same way —
+                      that's a browser limitation. The picker is the main path,
+                      so this accept is the key fix here. */}
+                  <input type="file" accept=".pdf,.doc,.docx,.xls,.xlsx,.ppt,.pptx,.txt,.zip,.rar,.csv,application/pdf,application/msword,application/vnd.openxmlformats-officedocument.wordprocessingml.document,application/vnd.ms-excel,application/vnd.openxmlformats-officedocument.spreadsheetml.sheet,application/zip,text/plain,text/csv" className="hidden" onChange={handleFileInputChange} />
+                </label>
+
+                {/* Photo & Video — opens the gallery/photo picker filtered to media */}
+                <label className="flex cursor-pointer flex-col items-center justify-center gap-1 rounded-lg border border-[#232B45] px-2 py-3 text-center transition-colors hover:border-[#5B8DEF]/50 hover:bg-[#1A2040]">
+                  <svg width="20" height="20" viewBox="0 0 24 24" fill="none" aria-hidden="true">
+                    <rect x="3" y="4" width="18" height="16" rx="2" stroke="#5B8DEF" strokeWidth="2" />
+                    <circle cx="9" cy="9" r="2" stroke="#5B8DEF" strokeWidth="2" />
+                    <path d="M5 17l4-4 3 3 2-2 4 3" stroke="#5B8DEF" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" />
+                  </svg>
+                  <span className="text-xs font-medium text-[#E8ECF5]">Photo/Video</span>
+                  <input type="file" accept="image/*,video/*" className="hidden" onChange={handleFileInputChange} />
+                </label>
+
+                {/* Camera — on supported mobile browsers (Android Chrome, iPhone
+                    Safari) this opens the live camera for a PHOTO: capture="environment"
+                    prompts for camera permission and launches the native camera UI
+                    (reliable, standards-based). On desktop it falls back to the file
+                    picker (acceptable there). Note: true in-browser VIDEO recording
+                    from the camera isn't reliably supported this way across all phones
+                    — that would need a separate MediaRecorder-based custom UI, which is
+                    a bigger feature. For now, Camera is scoped to live PHOTO capture only. */}
+                <label className="flex cursor-pointer flex-col items-center justify-center gap-1 rounded-lg border border-[#232B45] px-2 py-3 text-center transition-colors hover:border-[#5B8DEF]/50 hover:bg-[#1A2040]">
+                  <svg width="20" height="20" viewBox="0 0 24 24" fill="none" aria-hidden="true">
+                    <path d="M4 7h3l2-2h6l2 2h3v12H4z" stroke="#5B8DEF" strokeWidth="2" strokeLinejoin="round" />
+                    <circle cx="12" cy="13" r="3.5" stroke="#5B8DEF" strokeWidth="2" />
+                  </svg>
+                  <span className="text-xs font-medium text-[#E8ECF5]">Camera</span>
+                  <input type="file" accept="image/*" capture="environment" className="hidden" onChange={handleFileInputChange} />
+                </label>
+              </div>
+              )}
               {sendingFileName && (
                 <div className="flex flex-col gap-1">
                   <div className="flex items-baseline justify-between">
