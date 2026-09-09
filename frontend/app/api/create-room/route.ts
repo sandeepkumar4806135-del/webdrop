@@ -1,19 +1,29 @@
 // POST /api/create-room
 // Creates a new pairing room: generates a random 4-digit code, stores it in
 // Redis for 10 minutes, and returns the code so the sender can show/QR it.
-import { NextResponse } from "next/server";
+import { NextResponse, type NextRequest } from "next/server";
 import { Redis } from "@upstash/redis";
+import { checkRateLimit, clientIp } from "../../lib/rateLimit";
 
 // How long a room stays alive, in seconds (10 minutes).
 // After that the key disappears from Redis by itself, so abandoned
 // rooms never pile up.
 const ROOM_TTL_SECONDS = 600;
 
-export async function POST() {
+export async function POST(request: NextRequest) {
   // Create the Redis client from the environment variables
   // UPSTASH_REDIS_REST_URL and UPSTASH_REDIS_REST_TOKEN.
   // (Next.js loads these from frontend/.env.local automatically.)
   const redis = Redis.fromEnv();
+
+  // Generous limit: creating rooms is normal, occasional use. 20 per IP per
+  // minute is plenty, and blocks anyone spamming rooms into existence.
+  const limited = await checkRateLimit(
+    redis,
+    clientIp(request),
+    "create-room",
+  );
+  if (limited) return limited;
 
   // Try a few times in case we randomly pick a code that is already in use.
   let code = "";

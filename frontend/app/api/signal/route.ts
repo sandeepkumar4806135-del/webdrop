@@ -11,6 +11,7 @@
 // (taken from the front), so they arrive in the same order they were sent.
 import { NextResponse, type NextRequest } from "next/server";
 import { Redis } from "@upstash/redis";
+import { checkRateLimit, clientIp } from "../../lib/rateLimit";
 
 // Queues live for 10 minutes after their last message, just like rooms.
 const QUEUE_TTL_SECONDS = 600;
@@ -31,6 +32,14 @@ function outboxKey(code: string, role: string) {
 
 // Deliver one message to the other peer
 export async function POST(request: NextRequest) {
+  // Create the Redis client from UPSTASH_REDIS_REST_URL / _TOKEN
+  const redis = Redis.fromEnv();
+
+  // Gentle limit so one IP can't hammer the endpoint with junk messages.
+  // Shared counter with the GET below; normal active use stays well under it.
+  const limited = await checkRateLimit(redis, clientIp(request), "signal");
+  if (limited) return limited;
+
   // Read { code, role, data } from the request body
   const body = await request.json().catch(() => null);
   const code = body?.code as string | undefined;
@@ -47,9 +56,6 @@ export async function POST(request: NextRequest) {
   ) {
     return NextResponse.json({ error: "bad-request" }, { status: 400 });
   }
-
-  // Create the Redis client from UPSTASH_REDIS_REST_URL / _TOKEN
-  const redis = Redis.fromEnv();
 
   // Push the message onto the other peer's queue, and refresh the queue's
   // expiry at the same time (pipeline = both commands in one round trip).
@@ -75,6 +81,11 @@ export async function GET(request: NextRequest) {
 
   // Create the Redis client from UPSTASH_REDIS_REST_URL / _TOKEN
   const redis = Redis.fromEnv();
+
+  // Gentle limit. Normal use: one side polls this every ~1.2s (~50/min), well
+  // under the 60/min cap shared with POST, so active sessions never break.
+  const limited = await checkRateLimit(redis, clientIp(request), "signal");
+  if (limited) return limited;
 
   // Pop every message from our inbox, one at a time, until it is empty.
   // Because each LPOP removes exactly one message, nothing is ever delivered

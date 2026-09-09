@@ -4,12 +4,21 @@
 // their next poll) and tell the joiner that the join worked.
 import { NextResponse, type NextRequest } from "next/server";
 import { Redis } from "@upstash/redis";
+import { checkRateLimit, clientIp } from "../../lib/rateLimit";
 
 // Queues live for 10 minutes after their last message, just like rooms,
 // so empty leftovers get cleaned up by Redis automatically.
 const QUEUE_TTL_SECONDS = 600;
 
 export async function POST(request: NextRequest) {
+  // Create the Redis client from UPSTASH_REDIS_REST_URL / _TOKEN
+  const redis = Redis.fromEnv();
+
+  // Rate-limit join attempts per IP BEFORE doing any work, so an attacker
+  // can't brute-force 4-digit codes: max 10 tries per 60 seconds per IP.
+  const limited = await checkRateLimit(redis, clientIp(request), "join");
+  if (limited) return limited;
+
   // Read the { code } that the joiner sent in the request body.
   // .catch(() => null) protects us if the body is not valid JSON.
   const body = await request.json().catch(() => null);
@@ -19,9 +28,6 @@ export async function POST(request: NextRequest) {
   if (!code || !/^\d{4}$/.test(code)) {
     return NextResponse.json({ error: "bad-request" }, { status: 400 });
   }
-
-  // Create the Redis client from UPSTASH_REDIS_REST_URL / _TOKEN
-  const redis = Redis.fromEnv();
 
   // If the room does not exist (never created, or already expired)
   // tell the joiner it was not found.
