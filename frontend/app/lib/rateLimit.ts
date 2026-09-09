@@ -77,3 +77,34 @@ export async function checkRateLimit(
   }
   return null;
 }
+
+// A generous cap on request body size. Legitimate pairing/signaling payloads
+// are tiny (a 4-digit code string, an SDP offer/answer, or an ICE candidate),
+// so anything over ~10KB is abuse. We reject it before doing any real work so
+// an attacker can't use our endpoints as free bandwidth / memory churn.
+export const MAX_BODY_BYTES = 10 * 1024; // 10 KB
+
+// Read a request body as JSON while enforcing MAX_BODY_BYTES.
+// Returns { ok: true, data } on success, or { ok: false, reason } on failure.
+export async function readJsonBody(
+  request: NextRequest,
+  maxBytes: number = MAX_BODY_BYTES,
+): Promise<
+  | { ok: true; data: unknown }
+  | { ok: false; reason: "invalid-json" | "too-large" }
+> {
+  const raw = await request.text().catch(() => null);
+  // A completely empty body is not a valid JSON payload here.
+  if (raw === null || raw.length === 0) {
+    return { ok: false, reason: "invalid-json" };
+  }
+  // Size guard: reject oversized bodies before attempting to parse them.
+  if (raw.length > maxBytes) {
+    return { ok: false, reason: "too-large" };
+  }
+  try {
+    return { ok: true, data: JSON.parse(raw) as unknown };
+  } catch {
+    return { ok: false, reason: "invalid-json" };
+  }
+}

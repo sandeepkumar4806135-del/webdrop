@@ -3,7 +3,7 @@
 // Redis for 10 minutes, and returns the code so the sender can show/QR it.
 import { NextResponse, type NextRequest } from "next/server";
 import { Redis } from "@upstash/redis";
-import { checkRateLimit, clientIp } from "../../lib/rateLimit";
+import { checkRateLimit, clientIp, MAX_BODY_BYTES } from "../../lib/rateLimit";
 
 // How long a room stays alive, in seconds (10 minutes).
 // After that the key disappears from Redis by itself, so abandoned
@@ -24,6 +24,14 @@ export async function POST(request: NextRequest) {
     "create-room",
   );
   if (limited) return limited;
+
+  // This endpoint doesn't need a body, but we still reject any request that
+  // ships a huge payload (nothing legitimate is this big) to avoid wasting
+  // resources on oversized bodies.
+  const rawBody = await request.text().catch(() => "");
+  if (rawBody && rawBody.length > MAX_BODY_BYTES) {
+    return NextResponse.json({ error: "payload-too-large" }, { status: 413 });
+  }
 
   // Try a few times in case we randomly pick a code that is already in use.
   let code = "";

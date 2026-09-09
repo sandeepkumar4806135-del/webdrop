@@ -11,7 +11,7 @@
 // (taken from the front), so they arrive in the same order they were sent.
 import { NextResponse, type NextRequest } from "next/server";
 import { Redis } from "@upstash/redis";
-import { checkRateLimit, clientIp } from "../../lib/rateLimit";
+import { checkRateLimit, clientIp, readJsonBody } from "../../lib/rateLimit";
 
 // Queues live for 10 minutes after their last message, just like rooms.
 const QUEUE_TTL_SECONDS = 600;
@@ -40,20 +40,47 @@ export async function POST(request: NextRequest) {
   const limited = await checkRateLimit(redis, clientIp(request), "signal");
   if (limited) return limited;
 
-  // Read { code, role, data } from the request body
-  const body = await request.json().catch(() => null);
-  const code = body?.code as string | undefined;
-  const role = body?.role as string | undefined;
-  const data = body?.data;
+  // Read { code, role, data } from the request body, enforcing a max size so
+  // the endpoint can't be used to relay oversized payloads as free bandwidth.
+  const parsedBody = await readJsonBody(request);
+  if (!parsedBody.ok) {
+    return NextResponse.json(
+      { error: parsedBody.reason === "too-large" ? "payload-too-large" : "bad-request" },
+      { status: parsedBody.reason === "too-large" ? 413 : 400 },
+    );
+  }
+  const b = parsedBody.data as { code?: unknown; role?: unknown; data?: unknown };
+  const code = b.code;
+  const role = b.role;
+  const data = b.data;
 
   // "role" tells us who is SENDING, so we must check it is a known value
   // before we can decide which queue to drop the message into.
   if (
     (role !== "creator" && role !== "joiner") ||
-    !code ||
-    !/^\d{4}$/.test(code) ||
-    data === undefined
+    typeof code !== "string" ||
+    !/^\d{4}$/.test(code)
   ) {
+    return NextResponse.json({ error: "bad-request" }, { status: 400 });
+  }
+
+  // Validate the payload we are about to relay. Only the three WebRTC
+  // signaling shapes are allowed; anything else (e.g. arbitrary objects
+  // with huge/malicious contents) is rejected with a 400 so the server
+  // can't be abused to bounce arbitrary traffic.
+  const dataObj = data as Record<string, unknown> | undefined;
+  const isPlainObject = (v: unknown): v is object =>
+    typeof v === "object" && v !== null && !Array.isArray(v);
+
+  let isValidData = false;
+  if (isPlainObject(dataObj)) {
+    if (dataObj.type === "offer" || dataObj.type === "answer") {
+      isValidData = isPlainObject(dataObj.sdp);
+    } else if (dataObj.type === "ice-candidate") {
+      isValidData = isPlainObject(dataObj.candidate);
+    }
+  }
+  if (!isValidData) {
     return NextResponse.json({ error: "bad-request" }, { status: 400 });
   }
 
