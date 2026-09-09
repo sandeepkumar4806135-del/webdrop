@@ -35,13 +35,9 @@ export async function POST(request: NextRequest) {
   // Create the Redis client from UPSTASH_REDIS_REST_URL / _TOKEN
   const redis = Redis.fromEnv();
 
-  // Gentle limit so one IP can't hammer the endpoint with junk messages.
-  // Shared counter with the GET below; normal active use stays well under it.
-  const limited = await checkRateLimit(redis, clientIp(request), "signal");
-  if (limited) return limited;
-
-  // Read { code, role, data } from the request body, enforcing a max size so
-  // the endpoint can't be used to relay oversized payloads as free bandwidth.
+  // Read { code, role, data } from the request body FIRST, enforcing a max
+  // size so the endpoint can't be used to relay oversized payloads as free
+  // bandwidth. We parse before rate limiting so we can scope the limit below.
   const parsedBody = await readJsonBody(request);
   if (!parsedBody.ok) {
     return NextResponse.json(
@@ -63,6 +59,14 @@ export async function POST(request: NextRequest) {
   ) {
     return NextResponse.json({ error: "bad-request" }, { status: 400 });
   }
+
+  // Gentle limit so one IP can't hammer the endpoint with junk messages.
+  // Keyed by IP + room code together, so a different pairing session from the
+  // same network uses its own counter and is never affected by this one.
+  // Normal use (a burst of SDP/ICE + a few polls during setup) stays well
+  // under the 90/60s cap.
+  const limited = await checkRateLimit(redis, clientIp(request), "signal", code);
+  if (limited) return limited;
 
   // Validate the payload we are about to relay. Only the three WebRTC
   // signaling shapes are allowed; anything else (e.g. arbitrary objects
@@ -109,9 +113,12 @@ export async function GET(request: NextRequest) {
   // Create the Redis client from UPSTASH_REDIS_REST_URL / _TOKEN
   const redis = Redis.fromEnv();
 
-  // Gentle limit. Normal use: one side polls this every ~1.2s (~50/min), well
-  // under the 60/min cap shared with POST, so active sessions never break.
-  const limited = await checkRateLimit(redis, clientIp(request), "signal");
+  // Gentle limit. Normal use: one side polls this every ~1.2s during setup
+  // (~50/min) plus the handshake burst, well under the 90/60s cap.
+  // Keyed by IP + room code so sessions from the same network don't share a
+  // counter. (Polling ends as soon as the P2P channel opens, so this limit
+  // only ever covers the short connection-setup window.)
+  const limited = await checkRateLimit(redis, clientIp(request), "signal", code);
   if (limited) return limited;
 
   // Pop every message from our inbox, one at a time, until it is empty.

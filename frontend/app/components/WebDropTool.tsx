@@ -181,6 +181,10 @@ export function WebDropTool() {
     channel.onopen = () => {
       setDataChannelOpen(true);
       setStatusMessage("P2P connection established!");
+      // The direct peer-to-peer channel is now live, so there is no reason to
+      // keep asking the server for signaling messages anymore. Shut the poller
+      // down to cut the load on /api/signal for the whole lifetime of a session.
+      stopPolling();
     };
     channel.onmessage = (event) => {
       resetSelfDestructIfRunning();

@@ -25,10 +25,11 @@ export const RATE_LIMITS: Record<string, RateLimitRule> = {
   join: { max: 10, windowSeconds: 60 },
   // Creating a room is normal, occasional use — be generous.
   "create-room": { max: 20, windowSeconds: 60 },
-  // Signal is polled every ~1.2s during an active session (once per side),
-  // so ~2 requests/sec is fair. 60 / 60s leaves lots of headroom while still
-  // catching a runaway abuser.
-  signal: { max: 60, windowSeconds: 60 },
+  // Signal is polled every ~1.2s during connection setup, plus a burst of
+  // SDP/ICE messages while the handshake completes — and since pairing is now
+  // keyed per (IP + room code), several sessions from one network no longer
+  // share a counter. 90 / 60s leaves comfortable headroom for that.
+  signal: { max: 90, windowSeconds: 60 },
 };
 
 // Turn a NextRequest into a best-guess client IP string. We prefer the first
@@ -50,16 +51,27 @@ export function clientIp(request: NextRequest): string {
 // @param redis   the Redis client (passed in so callers reuse one instance)
 // @param ip      the client IP from clientIp()
 // @param action  a key into RATE_LIMITS (e.g. "join")
+// @param scope   optional extra discriminator baked into the key, e.g. the
+//                room code for the "signal" action (see below)
 export async function checkRateLimit(
   redis: Redis,
   ip: string,
   action: string,
+  scope?: string,
 ): Promise<NextResponse | null> {
   const rule = RATE_LIMITS[action];
   // Unknown action: fail open (don't block anything).
   if (!rule) return null;
 
-  const key = `ratelimit:${action}:${ip}`;
+  // The "signal" limit is keyed by IP AND room code together, so that two
+  // different pairing sessions sharing one IP (e.g. multiple devices behind
+  // the same WiFi, or testing on a shared dev network) don't eat each other's
+  // budget. "join" / "create-room" are intentionally left as pure per-IP,
+  // since that's exactly what stops a single attacker guessing codes.
+  const key =
+    scope !== undefined
+      ? `ratelimit:${action}:${ip}:${scope}`
+      : `ratelimit:${action}:${ip}`;
 
   // INCR bumps the counter by 1 and returns the new value. It creates the
   // key on first use. We then set its expiry ONLY the first time so the
