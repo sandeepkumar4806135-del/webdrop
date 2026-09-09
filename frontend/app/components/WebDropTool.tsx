@@ -194,8 +194,16 @@ export function WebDropTool() {
           try {
             const parsed = JSON.parse(text);
             if (parsed.type === "file-meta") {
+              // Defensive cap: a peer could declare an extremely long filename
+              // to break the layout. Truncate to 255 chars for display/save
+              // purposes, but still accept the transfer itself.
+              const rawName =
+                typeof parsed.name === "string" && parsed.name.length > 0
+                  ? parsed.name
+                  : "download";
               incomingMetaRef.current = {
-                name: parsed.name as string,
+                name:
+                  rawName.length > 255 ? rawName.slice(0, 255) : rawName,
                 size: parsed.size as number,
                 mime: parsed.mime as string,
               };
