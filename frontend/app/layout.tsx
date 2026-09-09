@@ -29,8 +29,19 @@ export default function RootLayout({ children }: LayoutProps<"/">) {
       lang="en"
       className={`${spaceGrotesk.variable} ${inter.variable} h-full antialiased`}
     >
-      <body className="min-h-full flex flex-col font-[family-name:var(--font-inter)]">
+      <body className="min-h-full flex flex-col bg-[#0A0E1A] font-[family-name:var(--font-inter)]">
         {children}
+        <footer className="flex w-full flex-col items-center justify-center gap-1 px-4 pb-6 text-xs text-[#8B93A7]">
+          <div className="flex gap-4">
+            <a href="/privacy" className="transition-colors hover:text-[#5B8DEF]">
+              Privacy Policy
+            </a>
+            <a href="/terms" className="transition-colors hover:text-[#5B8DEF]">
+              Terms of Service
+            </a>
+          </div>
+          <p>© 2026 WebDrop</p>
+        </footer>
       </body>
     </html>
   );
