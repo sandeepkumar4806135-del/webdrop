@@ -1,6 +1,7 @@
 import type { Metadata, Viewport } from "next";
 import { Space_Grotesk, Inter } from "next/font/google";
 import { ServiceWorkerRegister } from "./components/ServiceWorkerRegister";
+import { SiteFooter } from "./components/SiteFooter";
 import "./globals.css";
 
 const spaceGrotesk = Space_Grotesk({
@@ -50,17 +51,7 @@ export default function RootLayout({ children }: LayoutProps<"/">) {
         {/* Registers /sw.js client-side for PWA installability. */}
         <ServiceWorkerRegister />
         {children}
-        <footer className="flex w-full flex-col items-center justify-center gap-1 px-4 pb-6 text-xs text-[#8B93A7]">
-          <div className="flex gap-4">
-            <a href="/privacy" className="transition-colors hover:text-[#5B8DEF]">
-              Privacy Policy
-            </a>
-            <a href="/terms" className="transition-colors hover:text-[#5B8DEF]">
-              Terms of Service
-            </a>
-          </div>
-          <p>© 2026 WebDrop</p>
-        </footer>
+        <SiteFooter />
       </body>
     </html>
   );

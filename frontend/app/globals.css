@@ -53,3 +53,224 @@ body {
     animation: none;
   }
 }
+
+/* Landing "How It Works" illustrations (light theme).
+   Tasteful, subtle loops. Disabled for reduced-motion users. */
+.landing-pulse-dot {
+  transform-box: fill-box;
+  transform-origin: center;
+  animation: landing-pulse 2s ease-in-out infinite;
+}
+
+.landing-pulse-dot-delay {
+  animation-delay: 1s;
+}
+
+@keyframes landing-pulse {
+  0%,
+  100% {
+    opacity: 0.35;
+    transform: scale(0.8);
+  }
+  50% {
+    opacity: 1;
+    transform: scale(1.15);
+  }
+}
+
+/* Dashed connector with a signal traveling between devices. */
+.landing-dash-line {
+  stroke-dasharray: 6 6;
+  animation: landing-dash 1.2s linear infinite;
+}
+
+@keyframes landing-dash {
+  to {
+    stroke-dashoffset: -12;
+  }
+}
+
+/* File icon sliding from one device to the other, then fading to loop. */
+.landing-file-move {
+  transform-box: fill-box;
+  animation: landing-file-slide 2.4s ease-in-out infinite;
+}
+
+@keyframes landing-file-slide {
+  0% {
+    transform: translateX(0);
+    opacity: 0;
+  }
+  15% {
+    opacity: 1;
+  }
+  70% {
+    transform: translateX(48px);
+    opacity: 1;
+  }
+  88%,
+  100% {
+    transform: translateX(48px);
+    opacity: 0;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .landing-pulse-dot,
+  .landing-dash-line,
+  .landing-file-move {
+    animation: none;
+  }
+}
+
+/* ── Hero: one continuous 6-second loop ──────────────────────────────
+   searching (0–33%) → pairing (33–66%) → transferring (66–100%).
+   Every element shares the SAME 6s cycle and uses percentage-based
+   keyframes, so the phases stay perfectly synchronized and the loop
+   resets seamlessly. Base (non-animated) opacity values are chosen so
+   that with reduced motion (animation: none) the scene rests in a
+   static "connected" state: dots + code + solid line visible, dashed
+   line and in-flight file hidden. */
+.hero-dot {
+  transform-box: fill-box;
+  transform-origin: center;
+  animation: hero-search 6s linear infinite;
+}
+
+@keyframes hero-search {
+  0% {
+    transform: scale(0.8);
+    opacity: 0.4;
+  }
+  8% {
+    transform: scale(1.15);
+    opacity: 1;
+  }
+  16% {
+    transform: scale(0.8);
+    opacity: 0.4;
+  }
+  24% {
+    transform: scale(1.15);
+    opacity: 1;
+  }
+  33%,
+  100% {
+    transform: scale(1);
+    opacity: 1;
+  }
+}
+
+/* Dashed connector: fades in for the pairing phase, then out. The dash
+   "travel" itself reuses the existing landing-dash keyframes (1.2s) on
+   top of the 6s visibility cycle via a comma-separated animation list. */
+.hero-dash {
+  opacity: 0;
+  animation:
+    hero-dash-appear 6s linear infinite,
+    landing-dash 1.2s linear infinite;
+}
+
+@keyframes hero-dash-appear {
+  0%,
+  30% {
+    opacity: 0;
+  }
+  36%,
+  63% {
+    opacity: 1;
+  }
+  69%,
+  100% {
+    opacity: 0;
+  }
+}
+
+/* Code/QR indicator card: fades in during pairing, out at handoff. */
+.hero-code {
+  opacity: 0;
+  animation: hero-code-fade 6s linear infinite;
+}
+
+@keyframes hero-code-fade {
+  0%,
+  34% {
+    opacity: 0;
+  }
+  42%,
+  60% {
+    opacity: 1;
+  }
+  68%,
+  100% {
+    opacity: 0;
+  }
+}
+
+/* Solid connection line: base opacity is 1 on purpose — that is the
+   static "connected" state shown to reduced-motion users. */
+.hero-solid {
+  opacity: 1;
+  animation: hero-solid 6s linear infinite;
+}
+
+@keyframes hero-solid {
+  0%,
+  64% {
+    opacity: 0;
+  }
+  70%,
+  94% {
+    opacity: 1;
+  }
+  100% {
+    opacity: 0;
+  }
+}
+
+/* File icon: slides across the solid line during the transfer phase. */
+.hero-file {
+  transform-box: fill-box;
+  opacity: 0;
+  animation: hero-file-slide 6s ease-in-out infinite;
+}
+
+@keyframes hero-file-slide {
+  0%,
+  66% {
+    transform: translateX(0);
+    opacity: 0;
+  }
+  70% {
+    opacity: 1;
+  }
+  92% {
+    transform: translateX(170px);
+    opacity: 1;
+  }
+  97%,
+  100% {
+    transform: translateX(170px);
+    opacity: 0;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .hero-dot,
+  .hero-dash,
+  .hero-code,
+  .hero-solid,
+  .hero-file {
+    animation: none;
+  }
+  /* Static fallback = connected state: hide transient elements only. */
+  .hero-dash,
+  .hero-file {
+    opacity: 0;
+  }
+  .hero-dot,
+  .hero-code,
+  .hero-solid {
+    opacity: 1;
+  }
+}
