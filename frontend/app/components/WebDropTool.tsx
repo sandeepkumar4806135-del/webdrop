@@ -671,9 +671,11 @@ export function WebDropTool() {
               )}
               {sendingFileName && (
                 <div className="flex flex-col gap-1">
-                  <div className="flex items-baseline justify-between">
-                    <p className="text-xs text-[#8B93A7]">Sending {sendingFileName}</p>
-                    <p className="text-xs font-medium text-[#E8ECF5]">{sendProgress}%</p>
+                  <div className="flex items-baseline justify-between gap-2">
+                    {/* min-w-0 + break-all let a long filename wrap inside
+                        the row instead of overflowing past the percentage. */}
+                    <p className="min-w-0 break-all text-xs text-[#8B93A7]">Sending {sendingFileName}</p>
+                    <p className="shrink-0 text-xs font-medium text-[#E8ECF5]">{sendProgress}%</p>
                   </div>
                   <div className="h-2 w-full overflow-hidden rounded-full bg-[#232B45]"><div className="h-2 rounded-full bg-[#5B8DEF] transition-all" style={{ width: `${sendProgress}%` }} /></div>
                   {sendSpeedText && (<p className="text-xs text-[#8B93A7]">{sendSpeedText}</p>)}
@@ -691,7 +693,11 @@ export function WebDropTool() {
                 </div>
               )}
               {incomingFile && (
-                <a href={incomingFile.url} download={incomingFile.name} className="rounded-lg bg-[#34D399] px-4 py-2 text-sm font-semibold text-[#0A0E1A] transition-colors hover:bg-[#2BC08A] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[#34D399] focus-visible:ring-offset-2 focus-visible:ring-offset-[#12172A]">Download {incomingFile.name}</a>
+                /* break-all lets very long filenames wrap onto multiple
+                    lines inside the button instead of overflowing past its
+                    edges. The download={...} attribute keeps the FULL,
+                    original filename — only the visible label wraps. */
+                <a href={incomingFile.url} download={incomingFile.name} className="break-all rounded-lg bg-[#34D399] px-4 py-2 text-center text-sm font-semibold text-[#0A0E1A] transition-colors hover:bg-[#2BC08A] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[#34D399] focus-visible:ring-offset-2 focus-visible:ring-offset-[#12172A]">Download {incomingFile.name}</a>
               )}
             </div>
           )}

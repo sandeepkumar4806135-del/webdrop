@@ -5,6 +5,8 @@ import {
   IosInstallButton,
   RecommendedBadge,
 } from "../components/InstallButton";
+import { FaqAccordion } from "../components/FaqAccordion";
+import { ContactForm } from "../components/ContactForm";
 
 export const metadata: Metadata = {
   title: "WebDrop — Instant File Transfer, Any Device",
@@ -348,6 +350,42 @@ export default function LandingPage() {
               <h3 className="font-[family-name:var(--font-space-grotesk)] text-lg font-bold text-[#1A1F2E]">iPhone &amp; iPad</h3>
               <IosInstallButton />
             </div>
+          </div>
+        </div>
+      </section>
+      {/* FAQ section — the nav "FAQ" link scrolls here. The accordion
+          itself is a client component (FaqAccordion) so this page stays
+          a server component. */}
+      <section
+        id="faq"
+        className="w-full scroll-mt-16 border-t border-[#E6EAF2] bg-white"
+      >
+        <div className="mx-auto max-w-6xl px-6 py-16 text-center lg:py-20">
+          <h2 className="font-[family-name:var(--font-space-grotesk)] text-3xl font-bold tracking-tight text-[#1A1F2E] sm:text-4xl">
+            Frequently Asked Questions
+          </h2>
+          <p className="mx-auto mt-3 max-w-xl text-base leading-relaxed text-[#5B6472]">
+            Everything you need to know about how WebDrop works.
+          </p>
+          <FaqAccordion />
+        </div>
+      </section>
+      {/* Contact section — last section on the page (above the footer);
+          the nav "Contact" link scrolls here. The form itself is a client
+          component (ContactForm) so this page stays a server component. */}
+      <section
+        id="contact"
+        className="w-full scroll-mt-16 border-t border-[#E6EAF2] bg-[#FAFBFC]"
+      >
+        <div className="mx-auto max-w-6xl px-6 py-16 text-center lg:py-20">
+          <h2 className="font-[family-name:var(--font-space-grotesk)] text-3xl font-bold tracking-tight text-[#1A1F2E] sm:text-4xl">
+            Get in Touch
+          </h2>
+          <p className="mx-auto mt-3 max-w-xl text-base leading-relaxed text-[#5B6472]">
+            Questions, feedback, or something not working right? Let us know.
+          </p>
+          <div className="mt-10">
+            <ContactForm />
           </div>
         </div>
       </section>
