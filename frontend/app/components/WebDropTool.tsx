@@ -4,7 +4,6 @@ import {
   useState,
   useEffect,
   useRef,
-  useCallback,
   type ChangeEvent,
   type DragEvent,
 } from "react";
@@ -62,10 +61,15 @@ export function WebDropTool() {
   const [receiveSpeedText, setReceiveSpeedText] = useState("");
   const [largeFileWarning, setLargeFileWarning] = useState(false);
   const [sendingFileName, setSendingFileName] = useState("");
-  const [incomingFile, setIncomingFile] = useState<{
-    name: string;
-    url: string;
-  } | null>(null);
+  // Receiver: every completed file appends its own entry here (bulk sends
+  // deliver files one after another), instead of overwriting the last one.
+  const [receivedFiles, setReceivedFiles] = useState<
+    { name: string; url: string }[]
+  >([]);
+  // Sender bulk queue UI: current position ("2 of 5") and a short summary
+  // line shown after the whole queue finishes ("5 files sent").
+  const [sendQueueLabel, setSendQueueLabel] = useState("");
+  const [sendSummary, setSendSummary] = useState("");
   const [isDragging, setIsDragging] = useState(false);
 
   const flowRef = useRef<"sending" | "receiving">("sending");
@@ -79,10 +83,20 @@ export function WebDropTool() {
   const receivedChunksRef = useRef(0);
   const sendSpeedRef = useRef({ lastUpdate: 0, lastBytes: 0 });
   const receiveSpeedRef = useRef({ lastUpdate: 0, lastBytes: 0 });
+  // Bulk send queue: files waiting to be sent, whether the pump is running,
+  // and the total in the current batch (for the "2 of 5" label).
+  const sendQueueRef = useRef<File[]>([]);
+  const sendingActiveRef = useRef(false);
+  const sendBatchTotalRef = useRef(0);
+  const sendSummaryTimerRef = useRef<ReturnType<typeof setTimeout> | null>(
+    null,
+  );
+  // Receiver: object URLs of every received file, revoked on session reset.
+  const receivedUrlsRef = useRef<string[]>([]);
 
   const [countdown, setCountdown] = useState(0);
   const countdownRef = useRef<ReturnType<typeof setInterval> | null>(null);
-  const COUNTDOWN_SECONDS = 30;
+  const COUNTDOWN_SECONDS = 60;
   const transferCompletedRef = useRef(false);
   const startSelfDestruct = () => {
     if (countdownRef.current !== null) {
@@ -94,7 +108,10 @@ export function WebDropTool() {
         if (prev <= 1) {
           clearInterval(countdownRef.current as unknown as number);
           countdownRef.current = null;
-          handleReset();
+          // Auto-close uses the LIGHTWEIGHT close: kill the connection but
+          // keep the user on this screen with their files/messages intact.
+          // Only the manual "Start over" button does the full reset.
+          closeConnection();
           return 0;
         }
         return prev - 1;
@@ -116,12 +133,49 @@ export function WebDropTool() {
     }
   };
 
-  const stopPolling = useCallback(() => {
+  const stopPolling = () => {
     if (pollRef.current !== null) {
       clearInterval(pollRef.current);
       pollRef.current = null;
     }
-  }, []);
+  };
+
+  /* Lightweight auto-close (fires when the self-destruct countdown hits 0).
+     Privacy teardown ONLY: stops polling, closes the data channel and peer
+     connection, and clears pairing code / session transfer buffers — but
+     does NOT navigate away or wipe history. The user stays on the current
+     screen with received download links, chat history, and the manual
+     "Start over" button intact. (The poll-clearing is inlined rather than
+     calling the memoized stopPolling, so this stays a plain function.) */
+  const closeConnection = () => {
+    if (pollRef.current !== null) {
+      clearInterval(pollRef.current);
+      pollRef.current = null;
+    }
+    if (countdownRef.current !== null) {
+      clearInterval(countdownRef.current);
+      countdownRef.current = null;
+    }
+    setCountdown(0);
+    dataChannelRef.current?.close();
+    dataChannelRef.current = null;
+    peerConnectionRef.current?.close();
+    peerConnectionRef.current = null;
+    // Clear pairing/session-specific WebRTC state.
+    codeRef.current = "";
+    setCode("");
+    setQrDataUrl("");
+    incomingMetaRef.current = null;
+    incomingChunksRef.current = [];
+    incomingBytesRef.current = 0;
+    receivedChunksRef.current = 0;
+    sendQueueRef.current = [];
+    sendingActiveRef.current = false;
+    transferCompletedRef.current = false;
+    setStatusMessage(
+      "Session closed for privacy. Your received files are still available below.",
+    );
+  };
 
   const myRole = (): "creator" | "joiner" =>
     flowRef.current === "sending" ? "creator" : "joiner";
@@ -215,7 +269,9 @@ export function WebDropTool() {
               receivedChunksRef.current = 0;
               receiveSpeedRef.current = { lastUpdate: 0, lastBytes: 0 };
               setReceiveSpeedText("");
-              setIncomingFile(null);
+              // Bulk sends deliver files one after another: a new file-meta
+              // starts the next transfer but must NOT wipe the download
+              // entries of files already received in this session.
               setReceiveProgress(0);
               return;
             }
@@ -225,10 +281,14 @@ export function WebDropTool() {
                 const blob = new Blob(incomingChunksRef.current, {
                   type: meta.mime,
                 });
-                setIncomingFile({
-                  name: meta.name,
-                  url: URL.createObjectURL(blob),
-                });
+                const url = URL.createObjectURL(blob);
+                receivedUrlsRef.current.push(url);
+                // Append: each completed file gets its own download entry,
+                // so a 5-file bulk send ends with 5 separate links.
+                setReceivedFiles((prev) => [
+                  ...prev,
+                  { name: meta.name, url },
+                ]);
                 setReceiveProgress(100);
               }
               setReceiveSpeedText("");
@@ -368,7 +428,9 @@ export function WebDropTool() {
       dataChannelRef.current?.close();
       peerConnectionRef.current?.close();
     };
-  }, [stopPolling]);
+    // Unmount-only cleanup: closeConnection/handleReset handle the live
+    // teardown during the session, so this effect must never re-run.
+  }, []);
   const handleSend = async () => {
     flowRef.current = "sending";
     setIsSender(true);
@@ -446,10 +508,15 @@ export function WebDropTool() {
       );
     });
 
-  const handleFileSend = async (file: File | undefined) => {
-    if (!file) return;
+  const sendSingleFile = async (file: File) => {
     const channel = dataChannelRef.current;
-    if (!channel || channel.readyState !== "open") return;
+    if (!channel || channel.readyState !== "open") {
+      // Channel died mid-queue: abandon what's left rather than sending
+      // chunks of a later file into a dead stream.
+      sendQueueRef.current = [];
+      sendingActiveRef.current = false;
+      return;
+    }
     channel.send(
       JSON.stringify({
         type: "file-meta",
@@ -470,8 +537,9 @@ export function WebDropTool() {
         channel.send(JSON.stringify({ type: "file-end" }));
         setSendProgress(100);
         setSendSpeedText("");
-        transferCompletedRef.current = true;
-        startSelfDestruct();
+        // This file is done — the queue pump decides what happens next
+        // (start the next file, or finish the batch + self-destruct).
+        pumpNext();
         return;
       }
       await waitForDrain();
@@ -501,15 +569,74 @@ export function WebDropTool() {
     sendNextChunk();
   };
 
+  /* End of a batch: clear the queue label, show "N files sent" for a few
+     seconds (only for real bulk sends), and only NOW start the 30s
+     self-destruct countdown — after the ENTIRE queue, not the first file. */
+  const finishBatch = () => {
+    sendingActiveRef.current = false;
+    const total = sendBatchTotalRef.current;
+    sendBatchTotalRef.current = 0;
+    setSendQueueLabel("");
+    transferCompletedRef.current = true;
+    startSelfDestruct();
+    if (total > 1) {
+      setSendSummary(`${total} files sent`);
+      if (sendSummaryTimerRef.current !== null) {
+        clearTimeout(sendSummaryTimerRef.current);
+      }
+      sendSummaryTimerRef.current = setTimeout(() => {
+        setSendSummary("");
+        sendSummaryTimerRef.current = null;
+      }, 6000);
+    }
+  };
+
+  /* Queue pump: pops the next pending file and sends it. The chunking,
+     backpressure, and progress logic inside sendSingleFile is unchanged —
+     this just chains files sequentially. */
+  const pumpNext = () => {
+    const next = sendQueueRef.current.shift();
+    if (!next) {
+      finishBatch();
+      return;
+    }
+    const total = sendBatchTotalRef.current;
+    const idx = total - sendQueueRef.current.length;
+    setSendQueueLabel(total > 1 ? `${idx} of ${total}` : "");
+    void sendSingleFile(next);
+  };
+
+  /* Entry point for every selection path (file inputs + drag & drop).
+     Accepts the FULL FileList: all chosen/dropped files are appended to
+     the queue and sent one at a time, in order. Files picked while an
+     earlier send is still running simply join the end of the queue. */
+  const handleFileSend = (files: FileList | File[] | null) => {
+    const valid = files ? Array.from(files) : [];
+    if (valid.length === 0) return;
+    const channel = dataChannelRef.current;
+    if (!channel || channel.readyState !== "open") return;
+    // A new batch supersedes any pending self-destruct countdown: the timer
+    // must restart only after the whole queue finishes, so stop it now and
+    // clear the completed flag until the batch ends.
+    cancelSelfDestruct();
+    transferCompletedRef.current = false;
+    setSendSummary("");
+    sendQueueRef.current = sendQueueRef.current.concat(valid);
+    sendBatchTotalRef.current += valid.length;
+    if (sendingActiveRef.current) return; // already pumping — queued for later
+    sendingActiveRef.current = true;
+    pumpNext();
+  };
+
   const handleFileInputChange = (e: ChangeEvent<HTMLInputElement>) => {
-    handleFileSend(e.target.files?.[0]);
+    handleFileSend(e.target.files);
     e.target.value = "";
   };
 
   const handleDrop = (e: DragEvent) => {
     e.preventDefault();
     setIsDragging(false);
-    handleFileSend(e.dataTransfer.files[0]);
+    handleFileSend(e.dataTransfer.files);
   };
 
   const handleReset = () => {
@@ -537,7 +664,20 @@ export function WebDropTool() {
     setReceiveSpeedText("");
     setLargeFileWarning(false);
     setSendingFileName("");
-    setIncomingFile(null);
+    setSendQueueLabel("");
+    setSendSummary("");
+    if (sendSummaryTimerRef.current !== null) {
+      clearTimeout(sendSummaryTimerRef.current);
+      sendSummaryTimerRef.current = null;
+    }
+    setReceivedFiles([]);
+    for (const url of receivedUrlsRef.current) {
+      URL.revokeObjectURL(url);
+    }
+    receivedUrlsRef.current = [];
+    sendQueueRef.current = [];
+    sendingActiveRef.current = false;
+    sendBatchTotalRef.current = 0;
     setIsDragging(false);
     incomingMetaRef.current = null;
     incomingChunksRef.current = [];
@@ -589,66 +729,92 @@ export function WebDropTool() {
         </div>
       )}
       {screen === "connected" && (
-        <div className="flex flex-col items-center gap-4 text-center">
+        <div className="flex flex-col items-center gap-5 text-center">
           <div className="flex h-14 w-14 items-center justify-center rounded-full bg-[#34D399]/10 ring-2 ring-[#34D399]/30">
             <svg width="28" height="28" viewBox="0 0 24 24" fill="none" aria-hidden="true"><path d="M4 12.5l5 5L20 7" stroke="#34D399" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round" /></svg>
           </div>
           <p className="text-lg font-semibold text-[#E8ECF5]">{statusMessage}</p>
           {dataChannelOpen && (
-            <div className="flex w-full flex-col gap-3 border-t border-[#232B45] pt-4">
+            <div className="flex w-full flex-col gap-4 border-t border-[#232B45] pt-5">
               {/* Text messenger is TWO-way: both the sending and receiving
-                  devices can type & send once dataChannelOpen is true. The
-                  messages list below shows messages from both sides ("You:"
-                  for your own, "Peer:" for the remote device's). */}
+                  devices can type & send once dataChannelOpen is true.
+                  Messages render as chat bubbles: sent messages align right
+                  in electric blue, received align left in a neutral bubble —
+                  alignment + color convey who sent what. Stored strings keep
+                  their "You: "/"Peer: " prefixes; they are stripped at
+                  render time only. */}
               <div className="flex gap-2">
-                <input type="text" value={messageInput} onChange={(e) => setMessageInput(e.target.value)} onKeyDown={(e) => { if (e.key === "Enter") handleSendMessage(); }} placeholder="Type a message" className="w-full flex-1 rounded-lg border border-[#232B45] bg-[#0A0E1A] px-3 py-2 text-[#E8ECF5] outline-none placeholder:text-[#8B93A7]/50 focus:ring-2 focus:ring-[#5B8DEF]" />
-                <button onClick={handleSendMessage} className="rounded-lg bg-[#5B8DEF] px-4 py-2 font-semibold text-white transition-colors hover:bg-[#4A7DE0] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[#5B8DEF] focus-visible:ring-offset-2 focus-visible:ring-offset-[#12172A]">Send Message</button>
+                <input type="text" value={messageInput} onChange={(e) => setMessageInput(e.target.value)} onKeyDown={(e) => { if (e.key === "Enter") handleSendMessage(); }} placeholder="Type a message" className="w-full flex-1 rounded-xl border border-[#232B45] bg-[#0A0E1A] px-4 py-2.5 text-[#E8ECF5] outline-none placeholder:text-[#8B93A7]/50 focus:ring-2 focus:ring-[#5B8DEF]" />
+                <button onClick={handleSendMessage} className="rounded-xl bg-[#5B8DEF] px-4 py-2.5 font-semibold text-white transition-colors hover:bg-[#4A7DE0] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[#5B8DEF] focus-visible:ring-offset-2 focus-visible:ring-offset-[#12172A]">Send Message</button>
               </div>
               {messages.length > 0 && (
-                <ul className="flex flex-col gap-2 text-left text-sm text-[#8B93A7]">
-                  {messages.map((msg, i) => (<li key={i} className="break-words rounded-lg bg-[#0A0E1A] px-3 py-2 text-[#E8ECF5]">{msg}</li>))}
+                /* Chat log: bounded height, scrolls once it grows long. */
+                <ul className="flex max-h-56 w-full flex-col gap-2 overflow-y-auto rounded-xl border border-[#232B45] bg-[#0A0E1A] p-3 text-left">
+                  {messages.map((msg, i) => {
+                    const mine = msg.startsWith("You: ");
+                    return (
+                      <li key={i} className={`flex ${mine ? "justify-end" : "justify-start"}`}>
+                        <span
+                          className={`max-w-[85%] break-words rounded-2xl px-3.5 py-2 text-sm leading-snug ${
+                            mine
+                              ? "rounded-br-md bg-[#5B8DEF] text-white"
+                              : "rounded-bl-md bg-[#1A2036] text-[#E8ECF5]"
+                          }`}
+                        >
+                          {mine ? msg.slice(5) : msg.slice(6)}
+                        </span>
+                      </li>
+                    );
+                  })}
                 </ul>
               )}
             </div>
           )}
           {dataChannelOpen && (
-            <div className="flex w-full flex-col gap-3 border-t border-[#232B45] pt-4">
+            <div className="flex w-full flex-col gap-4 border-t border-[#232B45] pt-5">
               {/* SEND OPTIONS — one-way: only the original SENDING device sees
                   these controls (isSender); the receiving device has no way to
                   send files back. All three inputs reuse the same handleFileSend
                   pipeline (via handleFileInputChange) — no duplication of the
                   chunking/backpressure/progress logic. */}
               {isSender && (
-              <div className="grid grid-cols-1 gap-2 sm:grid-cols-3">
+              <div className="grid grid-cols-1 gap-3 sm:grid-cols-3">
                 {/* Files — also stays the drag-and-drop target (as before) */}
                 <label
                   onDragOver={(e) => { e.preventDefault(); setIsDragging(true); }}
                   onDragLeave={() => setIsDragging(false)}
                   onDrop={handleDrop}
-                  className={`flex cursor-pointer flex-col items-center justify-center gap-1.5 rounded-lg border px-2 py-3 text-center transition-colors ${isDragging ? "border-[#5B8DEF] bg-[#5B8DEF]/10" : "border-[#232B45] hover:border-[#5B8DEF]/50 hover:bg-[#1A2040]"}`}
+                  className={`flex cursor-pointer flex-col items-center justify-center gap-2.5 rounded-xl border px-2 py-4 text-center transition-colors ${isDragging ? "border-[#5B8DEF] bg-[#5B8DEF]/10" : "border-[#232B45] hover:border-[#5B8DEF]/50 hover:bg-[#1A2040]"}`}
                 >
-                  <svg width="20" height="20" viewBox="0 0 24 24" fill="none" aria-hidden="true">
-                    <path d="M6 3h9l5 5v13H6z" stroke="#5B8DEF" strokeWidth="2" strokeLinejoin="round" />
-                    <path d="M14 3v6h6" stroke="#5B8DEF" strokeWidth="2" strokeLinejoin="round" />
-                    <path d="M9 12h6M9 16h6" stroke="#5B8DEF" strokeWidth="2" strokeLinecap="round" />
-                  </svg>
-                  <span className="text-xs font-medium text-[#E8ECF5]">Files</span>
+                  {/* Duotone tile: tinted rounded square behind a solid blue
+                      icon — reads better on the navy card than thin outlines. */}
+                  <span className="flex h-10 w-10 items-center justify-center rounded-xl bg-[#5B8DEF]/10">
+                    <svg width="22" height="22" viewBox="0 0 24 24" fill="none" aria-hidden="true">
+                      <path d="M6 3h9l5 5v13H6z" stroke="#5B8DEF" strokeWidth="1.75" strokeLinejoin="round" />
+                      <path d="M14 3v6h6" stroke="#5B8DEF" strokeWidth="1.75" strokeLinejoin="round" />
+                      <path d="M9 12h6M9 16h6" stroke="#5B8DEF" strokeWidth="1.75" strokeLinecap="round" />
+                    </svg>
+                  </span>
+                  <span className="text-sm font-medium text-[#E8ECF5]">Files</span>
                   <span className="text-[10px] text-[#8B93A7]/70">or drag &amp; drop here</span>
                   {/* Files opens the general file browser with NO type
                       restriction — any file can be picked. The restrictive
                       Photo/Video and Camera options handle media separately. */}
-                  <input type="file" className="hidden" onChange={handleFileInputChange} />
+                  <input type="file" multiple className="hidden" onChange={handleFileInputChange} />
                 </label>
 
-                {/* Photo & Video — opens the gallery/photo picker filtered to media */}
-                <label className="flex cursor-pointer flex-col items-center justify-center gap-1 rounded-lg border border-[#232B45] px-2 py-3 text-center transition-colors hover:border-[#5B8DEF]/50 hover:bg-[#1A2040]">
-                  <svg width="20" height="20" viewBox="0 0 24 24" fill="none" aria-hidden="true">
-                    <rect x="3" y="4" width="18" height="16" rx="2" stroke="#5B8DEF" strokeWidth="2" />
-                    <circle cx="9" cy="9" r="2" stroke="#5B8DEF" strokeWidth="2" />
-                    <path d="M5 17l4-4 3 3 2-2 4 3" stroke="#5B8DEF" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" />
-                  </svg>
-                  <span className="text-xs font-medium text-[#E8ECF5]">Photo/Video</span>
-                  <input type="file" accept="image/*,video/*" className="hidden" onChange={handleFileInputChange} />
+                {/* Photo & Video — opens the gallery/photo picker filtered to media.
+                    multiple: several photos/videos can be picked and queued. */}
+                <label className="flex cursor-pointer flex-col items-center justify-center gap-2.5 rounded-xl border border-[#232B45] px-2 py-4 text-center transition-colors hover:border-[#5B8DEF]/50 hover:bg-[#1A2040]">
+                  <span className="flex h-10 w-10 items-center justify-center rounded-xl bg-[#5B8DEF]/10">
+                    <svg width="22" height="22" viewBox="0 0 24 24" fill="none" aria-hidden="true">
+                      <rect x="3" y="4" width="18" height="16" rx="2.5" stroke="#5B8DEF" strokeWidth="1.75" />
+                      <circle cx="9" cy="9" r="2" stroke="#5B8DEF" strokeWidth="1.75" />
+                      <path d="M5 17l4-4 3 3 2-2 4 3" stroke="#5B8DEF" strokeWidth="1.75" strokeLinecap="round" strokeLinejoin="round" />
+                    </svg>
+                  </span>
+                  <span className="text-sm font-medium text-[#E8ECF5]">Photo/Video</span>
+                  <input type="file" accept="image/*,video/*" multiple className="hidden" onChange={handleFileInputChange} />
                 </label>
 
                 {/* Camera — on supported mobile browsers (Android Chrome, iPhone
@@ -659,45 +825,62 @@ export function WebDropTool() {
                     from the camera isn't reliably supported this way across all phones
                     — that would need a separate MediaRecorder-based custom UI, which is
                     a bigger feature. For now, Camera is scoped to live PHOTO capture only. */}
-                <label className="flex cursor-pointer flex-col items-center justify-center gap-1 rounded-lg border border-[#232B45] px-2 py-3 text-center transition-colors hover:border-[#5B8DEF]/50 hover:bg-[#1A2040]">
-                  <svg width="20" height="20" viewBox="0 0 24 24" fill="none" aria-hidden="true">
-                    <path d="M4 7h3l2-2h6l2 2h3v12H4z" stroke="#5B8DEF" strokeWidth="2" strokeLinejoin="round" />
-                    <circle cx="12" cy="13" r="3.5" stroke="#5B8DEF" strokeWidth="2" />
-                  </svg>
-                  <span className="text-xs font-medium text-[#E8ECF5]">Camera</span>
+                <label className="flex cursor-pointer flex-col items-center justify-center gap-2.5 rounded-xl border border-[#232B45] px-2 py-4 text-center transition-colors hover:border-[#5B8DEF]/50 hover:bg-[#1A2040]">
+                  <span className="flex h-10 w-10 items-center justify-center rounded-xl bg-[#5B8DEF]/10">
+                    <svg width="22" height="22" viewBox="0 0 24 24" fill="none" aria-hidden="true">
+                      <path d="M4 7h3l2-2h6l2 2h3v12H4z" stroke="#5B8DEF" strokeWidth="1.75" strokeLinejoin="round" />
+                      <circle cx="12" cy="13" r="3.5" stroke="#5B8DEF" strokeWidth="1.75" />
+                    </svg>
+                  </span>
+                  <span className="text-sm font-medium text-[#E8ECF5]">Camera</span>
                   <input type="file" accept="image/*" capture="environment" className="hidden" onChange={handleFileInputChange} />
                 </label>
               </div>
               )}
               {sendingFileName && (
-                <div className="flex flex-col gap-1">
+                <div className="flex flex-col gap-1.5">
                   <div className="flex items-baseline justify-between gap-2">
-                    {/* min-w-0 + break-all let a long filename wrap inside
-                        the row instead of overflowing past the percentage. */}
-                    <p className="min-w-0 break-all text-xs text-[#8B93A7]">Sending {sendingFileName}</p>
+                    {/* Bulk sends show the position in the queue, e.g.
+                        "Sending 2 of 5: name.jpg"; single sends keep the
+                        plain "Sending name.jpg". min-w-0 + break-all let a
+                        long filename wrap inside the row. */}
+                    <p className="min-w-0 break-all text-xs text-[#8B93A7]">
+                      Sending{sendQueueLabel ? ` ${sendQueueLabel}:` : ""} {sendingFileName}
+                    </p>
                     <p className="shrink-0 text-xs font-medium text-[#E8ECF5]">{sendProgress}%</p>
                   </div>
                   <div className="h-2 w-full overflow-hidden rounded-full bg-[#232B45]"><div className="h-2 rounded-full bg-[#5B8DEF] transition-all" style={{ width: `${sendProgress}%` }} /></div>
                   {sendSpeedText && (<p className="text-xs text-[#8B93A7]">{sendSpeedText}</p>)}
                 </div>
               )}
+              {sendSummary && (
+                /* Brief "5 files sent" confirmation after a bulk queue
+                    finishes; auto-clears after a few seconds. */
+                <p className="text-xs font-semibold text-[#34D399]">{sendSummary}</p>
+              )}
               {receiveProgress > 0 && receiveProgress < 100 && (
-                <div className="flex flex-col gap-1">
-                  <div className="flex items-baseline justify-between">
-                    <p className="text-xs text-[#8B93A7]">Receiving file</p>
-                    <p className="text-xs font-medium text-[#E8ECF5]">{receiveProgress}%</p>
+                <div className="flex flex-col gap-1.5">
+                  <div className="flex items-baseline justify-between gap-2">
+                    <p className="min-w-0 text-xs text-[#8B93A7]">Receiving file</p>
+                    <p className="shrink-0 text-xs font-medium text-[#E8ECF5]">{receiveProgress}%</p>
                   </div>
                   {largeFileWarning && (<p className="text-xs text-amber-400">Files over 2GB may not work reliably in this version</p>)}
                   <div className="h-2 w-full overflow-hidden rounded-full bg-[#232B45]"><div className="h-2 rounded-full bg-[#5B8DEF] transition-all" style={{ width: `${receiveProgress}%` }} /></div>
                   {receiveSpeedText && (<p className="text-xs text-[#8B93A7]">{receiveSpeedText}</p>)}
                 </div>
               )}
-              {incomingFile && (
-                /* break-all lets very long filenames wrap onto multiple
-                    lines inside the button instead of overflowing past its
-                    edges. The download={...} attribute keeps the FULL,
-                    original filename — only the visible label wraps. */
-                <a href={incomingFile.url} download={incomingFile.name} className="break-all rounded-lg bg-[#34D399] px-4 py-2 text-center text-sm font-semibold text-[#0A0E1A] transition-colors hover:bg-[#2BC08A] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[#34D399] focus-visible:ring-offset-2 focus-visible:ring-offset-[#12172A]">Download {incomingFile.name}</a>
+              {receivedFiles.length > 0 && (
+                /* Receiver's download list: one entry per completed file.
+                    Bulk sends end with several links stacked vertically,
+                    each downloading its own file (download={file.name}
+                    keeps the full original filename). */
+                <ul className="flex w-full flex-col gap-2">
+                  {receivedFiles.map((file, i) => (
+                    <li key={`${file.name}-${i}`}>
+                      <a href={file.url} download={file.name} className="block w-full break-all rounded-xl bg-[#34D399] px-4 py-3 text-center text-sm font-semibold text-[#0A0E1A] shadow-[0_0_20px_rgba(52,211,153,0.15)] transition-colors hover:bg-[#2BC08A] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[#34D399] focus-visible:ring-offset-2 focus-visible:ring-offset-[#12172A]">Download {file.name}</a>
+                    </li>
+                  ))}
+                </ul>
               )}
             </div>
           )}

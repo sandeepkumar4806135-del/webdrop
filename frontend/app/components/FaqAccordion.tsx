@@ -55,7 +55,7 @@ const FAQ_ITEMS: FaqItem[] = [
   {
     question: "Why did my session close automatically?",
     answer:
-      "For privacy, WebDrop automatically closes a session about 30 seconds after a transfer completes, clearing the connection. You can click “Cancel” on the countdown if you want to keep the session open longer.",
+      "For privacy, WebDrop automatically closes a session about 60 seconds after a transfer completes, clearing the connection. You can click “Cancel” on the countdown if you want to keep the session open longer — and any files you received stay downloadable even after the session closes.",
   },
   {
     question: "I got a “Code not found” error — what happened?",
