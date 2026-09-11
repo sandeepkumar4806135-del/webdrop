@@ -96,26 +96,29 @@ export function WebDropTool() {
 
   const [countdown, setCountdown] = useState(0);
   const countdownRef = useRef<ReturnType<typeof setInterval> | null>(null);
+  // Mirrors the countdown numerically so the interval callback can detect
+  // expiry WITHOUT putting side effects inside a setState updater (React
+  // may run updaters lazily/twice — side effects there are non-deterministic).
+  const countdownValueRef = useRef(0);
   const COUNTDOWN_SECONDS = 60;
   const transferCompletedRef = useRef(false);
   const startSelfDestruct = () => {
     if (countdownRef.current !== null) {
       clearInterval(countdownRef.current);
     }
+    countdownValueRef.current = COUNTDOWN_SECONDS;
     setCountdown(COUNTDOWN_SECONDS);
     countdownRef.current = setInterval(() => {
-      setCountdown((prev) => {
-        if (prev <= 1) {
-          clearInterval(countdownRef.current as unknown as number);
-          countdownRef.current = null;
-          // Auto-close uses the LIGHTWEIGHT close: kill the connection but
-          // keep the user on this screen with their files/messages intact.
-          // Only the manual "Start over" button does the full reset.
-          closeConnection();
-          return 0;
-        }
-        return prev - 1;
-      });
+      countdownValueRef.current -= 1;
+      setCountdown(countdownValueRef.current);
+      if (countdownValueRef.current <= 0) {
+        clearInterval(countdownRef.current as unknown as number);
+        countdownRef.current = null;
+        // Auto-close uses the LIGHTWEIGHT close: kill the connection but
+        // keep the user on this screen with their files/messages intact.
+        // Only the manual "Start over" button does the full reset.
+        closeConnection();
+      }
     }, 1000);
   };
 
@@ -140,13 +143,14 @@ export function WebDropTool() {
     }
   };
 
-  /* Lightweight auto-close (fires when the self-destruct countdown hits 0).
-     Privacy teardown ONLY: stops polling, closes the data channel and peer
-     connection, and clears pairing code / session transfer buffers — but
-     does NOT navigate away or wipe history. The user stays on the current
-     screen with received download links, chat history, and the manual
-     "Start over" button intact. (The poll-clearing is inlined rather than
-     calling the memoized stopPolling, so this stays a plain function.) */
+  /* Lightweight auto-close (fires when the self-destruct countdown hits 0,
+     or when the PEER closes first — see channel.onclose below). Privacy
+     teardown ONLY: stops polling, closes the data channel and peer
+     connection, and clears pairing code / in-progress transfer buffers —
+     but does NOT navigate away and does NOT touch any completed-file state
+     (receivedFiles / sendingFileName / sendSummary / blob URLs) or chat
+     history. The user stays on the current screen with all download links
+     intact and the manual "Start over" button available. */
   const closeConnection = () => {
     if (pollRef.current !== null) {
       clearInterval(pollRef.current);
@@ -157,14 +161,17 @@ export function WebDropTool() {
       countdownRef.current = null;
     }
     setCountdown(0);
+    // Actually close the live WebRTC transport (both the data channel and
+    // the underlying peer connection). No-ops if already closed/null.
     dataChannelRef.current?.close();
     dataChannelRef.current = null;
     peerConnectionRef.current?.close();
     peerConnectionRef.current = null;
-    // Clear pairing/session-specific WebRTC state.
+    // Clear pairing/session-specific connection state.
     codeRef.current = "";
     setCode("");
     setQrDataUrl("");
+    // Drop only IN-PROGRESS transfer buffers — never completed downloads.
     incomingMetaRef.current = null;
     incomingChunksRef.current = [];
     incomingBytesRef.current = 0;
@@ -239,6 +246,17 @@ export function WebDropTool() {
       // keep asking the server for signaling messages anymore. Shut the poller
       // down to cut the load on /api/signal for the whole lifetime of a session.
       stopPolling();
+    };
+    channel.onclose = () => {
+      // If the PEER closed first (their 60s timer expired, or they hit
+      // "Start over"), mirror the lightweight close here so this device's
+      // UI also reflects reality — status message, pairing code cleared,
+      // polling stopped — while keeping received files and chat history.
+      // The guard skips the close events triggered by OUR OWN internal
+      // teardown (closeConnection/handleReset null dataChannelRef before
+      // the onclose event fires asynchronously).
+      if (dataChannelRef.current !== channel) return;
+      closeConnection();
     };
     channel.onmessage = (event) => {
       resetSelfDestructIfRunning();
