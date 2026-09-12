@@ -64,13 +64,21 @@ export function WebDropTool() {
   // Receiver: every completed file appends its own entry here (bulk sends
   // deliver files one after another), instead of overwriting the last one.
   const [receivedFiles, setReceivedFiles] = useState<
-    { name: string; url: string }[]
+    { id: string; name: string; url: string; clearAt: number }[]
   >([]);
   // Sender bulk queue UI: current position ("2 of 5") and a short summary
   // line shown after the whole queue finishes ("5 files sent").
   const [sendQueueLabel, setSendQueueLabel] = useState("");
   const [sendSummary, setSendSummary] = useState("");
+  const [sendSummaryClearAt, setSendSummaryClearAt] = useState(0);
   const [isDragging, setIsDragging] = useState(false);
+  const [nowMs, setNowMs] = useState(() => Date.now());
+  const [completedSendItems, setCompletedSendItems] = useState<
+    { id: string; name: string; clearAt: number }[]
+  >([]);
+  const [closeRequestState, setCloseRequestState] = useState<
+    "idle" | "awaiting-peer" | "incoming" | "declined" | "unavailable"
+  >("idle");
 
   const flowRef = useRef<"sending" | "receiving">("sending");
   const pollRef = useRef<ReturnType<typeof setInterval> | null>(null);
@@ -91,48 +99,52 @@ export function WebDropTool() {
   const sendSummaryTimerRef = useRef<ReturnType<typeof setTimeout> | null>(
     null,
   );
+  const closeRequestTimerRef = useRef<ReturnType<typeof setTimeout> | null>(
+    null,
+  );
+  const clearTimersRef = useRef(
+    new Map<string, ReturnType<typeof setTimeout>>(),
+  );
   // Receiver: object URLs of every received file, revoked on session reset.
   const receivedUrlsRef = useRef<string[]>([]);
+  const transferIdRef = useRef(0);
 
-  const [countdown, setCountdown] = useState(0);
-  const countdownRef = useRef<ReturnType<typeof setInterval> | null>(null);
-  // Mirrors the countdown numerically so the interval callback can detect
-  // expiry WITHOUT putting side effects inside a setState updater (React
-  // may run updaters lazily/twice — side effects there are non-deterministic).
-  const countdownValueRef = useRef(0);
-  const COUNTDOWN_SECONDS = 60;
-  const transferCompletedRef = useRef(false);
-  const startSelfDestruct = () => {
-    if (countdownRef.current !== null) {
-      clearInterval(countdownRef.current);
+  const ITEM_CLEAR_SECONDS = 60;
+  const makeTransferId = () => {
+    transferIdRef.current += 1;
+    return `item-${Date.now().toString(36)}-${transferIdRef.current}`;
+  };
+  const clearItemTimer = (id: string) => {
+    const t = clearTimersRef.current.get(id);
+    if (t !== undefined) {
+      clearTimeout(t);
+      clearTimersRef.current.delete(id);
     }
-    countdownValueRef.current = COUNTDOWN_SECONDS;
-    setCountdown(COUNTDOWN_SECONDS);
-    countdownRef.current = setInterval(() => {
-      countdownValueRef.current -= 1;
-      setCountdown(countdownValueRef.current);
-      if (countdownValueRef.current <= 0) {
-        clearInterval(countdownRef.current as unknown as number);
-        countdownRef.current = null;
-        // Auto-close uses the LIGHTWEIGHT close: kill the connection but
-        // keep the user on this screen with their files/messages intact.
-        // Only the manual "Start over" button does the full reset.
-        closeConnection();
-      }
-    }, 1000);
+  };
+  const scheduleClear = (id: string, ms: number, remove: () => void) => {
+    clearItemTimer(id);
+    const t = setTimeout(() => {
+      clearTimersRef.current.delete(id);
+      remove();
+    }, ms);
+    clearTimersRef.current.set(id, t);
+  };
+  const clearAllPendingClears = () => {
+    for (const t of clearTimersRef.current.values()) {
+      clearTimeout(t);
+    }
+    clearTimersRef.current.clear();
   };
 
-  const cancelSelfDestruct = () => {
-    if (countdownRef.current !== null) {
-      clearInterval(countdownRef.current);
-      countdownRef.current = null;
-    }
-    setCountdown(0);
-  };
+  useEffect(() => {
+    const t = setInterval(() => setNowMs(Date.now()), 1000);
+    return () => clearInterval(t);
+  }, []);
 
-  const resetSelfDestructIfRunning = () => {
-    if (transferCompletedRef.current && countdownRef.current !== null) {
-      startSelfDestruct();
+  const stopPeerWait = () => {
+    if (closeRequestTimerRef.current !== null) {
+      clearTimeout(closeRequestTimerRef.current);
+      closeRequestTimerRef.current = null;
     }
   };
 
@@ -143,24 +155,30 @@ export function WebDropTool() {
     }
   };
 
-  /* Lightweight auto-close (fires when the self-destruct countdown hits 0,
-     or when the PEER closes first — see channel.onclose below). Privacy
-     teardown ONLY: stops polling, closes the data channel and peer
-     connection, and clears pairing code / in-progress transfer buffers —
-     but does NOT navigate away and does NOT touch any completed-file state
-     (receivedFiles / sendingFileName / sendSummary / blob URLs) or chat
-     history. The user stays on the current screen with all download links
-     intact and the manual "Start over" button available. */
+  const sendControl = (kind: string) => {
+    try {
+      if (dataChannelRef.current && dataChannelRef.current.readyState === "open") {
+        dataChannelRef.current.send(JSON.stringify({ kind }));
+      }
+    } catch {
+      // Non-fatal: control messages are best-effort over the data channel.
+    }
+  };
+
+  /* Lightweight teardown used when the PEER closes first (channel.onclose)
+     or after a mutual-consent close completes. Privacy teardown ONLY:
+     stops polling, closes the data channel and peer connection, and clears
+     pairing code / in-progress transfer buffers — but does NOT navigate away
+     and does NOT touch any completed-file state (receivedFiles /
+     completedSendItems / sendSummary / blob URLs) or chat history. The user
+     stays on the current screen with all download links intact. */
   const closeConnection = () => {
+    stopPeerWait();
+    setCloseRequestState("idle");
     if (pollRef.current !== null) {
       clearInterval(pollRef.current);
       pollRef.current = null;
     }
-    if (countdownRef.current !== null) {
-      clearInterval(countdownRef.current);
-      countdownRef.current = null;
-    }
-    setCountdown(0);
     // Actually close the live WebRTC transport (both the data channel and
     // the underlying peer connection). No-ops if already closed/null.
     dataChannelRef.current?.close();
@@ -178,10 +196,38 @@ export function WebDropTool() {
     receivedChunksRef.current = 0;
     sendQueueRef.current = [];
     sendingActiveRef.current = false;
-    transferCompletedRef.current = false;
     setStatusMessage(
       "Session closed for privacy. Your received files are still available below.",
     );
+  };
+
+  const requestCloseSession = () => {
+    if (closeRequestState === "awaiting-peer") return;
+    if (!dataChannelRef.current || dataChannelRef.current.readyState !== "open") {
+      setCloseRequestState("unavailable");
+      return;
+    }
+    sendControl("close-request");
+    setCloseRequestState("awaiting-peer");
+    if (closeRequestTimerRef.current !== null) {
+      clearTimeout(closeRequestTimerRef.current);
+    }
+    closeRequestTimerRef.current = setTimeout(() => {
+      closeRequestTimerRef.current = null;
+      setCloseRequestState((prev) => (prev === "awaiting-peer" ? "unavailable" : prev));
+    }, 15000);
+  };
+
+  const acceptCloseRequest = () => {
+    sendControl("close-accept");
+    stopPeerWait();
+    setCloseRequestState("idle");
+    handleReset();
+  };
+
+  const declineCloseRequest = () => {
+    sendControl("close-decline");
+    setCloseRequestState("idle");
   };
 
   const myRole = (): "creator" | "joiner" =>
@@ -248,8 +294,8 @@ export function WebDropTool() {
       stopPolling();
     };
     channel.onclose = () => {
-      // If the PEER closed first (their 60s timer expired, or they hit
-      // "Start over"), mirror the lightweight close here so this device's
+      // If the PEER closed first (they accepted our close request, or their
+      // side tore down), mirror the lightweight close here so this device's
       // UI also reflects reality — status message, pairing code cleared,
       // polling stopped — while keeping received files and chat history.
       // The guard skips the close events triggered by OUR OWN internal
@@ -259,7 +305,6 @@ export function WebDropTool() {
       closeConnection();
     };
     channel.onmessage = (event) => {
-      resetSelfDestructIfRunning();
       if (typeof event.data === "string") {
         const text = event.data as string;
         if (text.startsWith("{")) {
@@ -302,17 +347,40 @@ export function WebDropTool() {
                 const url = URL.createObjectURL(blob);
                 receivedUrlsRef.current.push(url);
                 // Append: each completed file gets its own download entry,
-                // so a 5-file bulk send ends with 5 separate links.
+                // so a 5-file bulk send ends with 5 separate links. Each
+                // entry removes itself 60s after ITS completion.
+                const recvId = makeTransferId();
+                const clearAt = Date.now() + ITEM_CLEAR_SECONDS * 1000;
                 setReceivedFiles((prev) => [
                   ...prev,
-                  { name: meta.name, url },
+                  { id: recvId, name: meta.name, url, clearAt },
                 ]);
+                scheduleClear(recvId, ITEM_CLEAR_SECONDS * 1000, () => {
+                  setReceivedFiles((prev) => {
+                    const target = prev.find((f) => f.id === recvId);
+                    if (target) URL.revokeObjectURL(target.url);
+                    return prev.filter((f) => f.id !== recvId);
+                  });
+                });
                 setReceiveProgress(100);
               }
               setReceiveSpeedText("");
               setLargeFileWarning(false);
-              transferCompletedRef.current = true;
-              startSelfDestruct();
+              return;
+            }
+            if (parsed.kind === "close-request") {
+              setCloseRequestState("incoming");
+              return;
+            }
+            if (parsed.kind === "close-accept") {
+              stopPeerWait();
+              setCloseRequestState("idle");
+              handleReset();
+              return;
+            }
+            if (parsed.kind === "close-decline") {
+              stopPeerWait();
+              setCloseRequestState("declined");
               return;
             }
           } catch {
@@ -439,9 +507,11 @@ export function WebDropTool() {
   useEffect(() => {
     return () => {
       stopPolling();
-      if (countdownRef.current !== null) {
-        clearInterval(countdownRef.current);
-        countdownRef.current = null;
+      clearAllPendingClears();
+      stopPeerWait();
+      if (sendSummaryTimerRef.current !== null) {
+        clearTimeout(sendSummaryTimerRef.current);
+        sendSummaryTimerRef.current = null;
       }
       dataChannelRef.current?.close();
       peerConnectionRef.current?.close();
@@ -555,8 +625,18 @@ export function WebDropTool() {
         channel.send(JSON.stringify({ type: "file-end" }));
         setSendProgress(100);
         setSendSpeedText("");
-        // This file is done — the queue pump decides what happens next
-        // (start the next file, or finish the batch + self-destruct).
+        // This file is done — register its own 60s sender-side entry first,
+        // then let the queue pump decide what happens next (start the
+        // next file, or finish the batch summary).
+        const sentId = makeTransferId();
+        const sentClearAt = Date.now() + ITEM_CLEAR_SECONDS * 1000;
+        setCompletedSendItems((prev) => [
+          ...prev,
+          { id: sentId, name: file.name, clearAt: sentClearAt },
+        ]);
+        scheduleClear(sentId, ITEM_CLEAR_SECONDS * 1000, () => {
+          setCompletedSendItems((prev) => prev.filter((f) => f.id !== sentId));
+        });
         pumpNext();
         return;
       }
@@ -587,25 +667,25 @@ export function WebDropTool() {
     sendNextChunk();
   };
 
-  /* End of a batch: clear the queue label, show "N files sent" for a few
-     seconds (only for real bulk sends), and only NOW start the 30s
-     self-destruct countdown — after the ENTIRE queue, not the first file. */
+  /* End of a batch: clear the queue label and show "N files sent" for 60s
+     (only for real bulk sends). Per-item entries already own their own 60s
+     removals, so no session countdown starts here. */
   const finishBatch = () => {
     sendingActiveRef.current = false;
     const total = sendBatchTotalRef.current;
     sendBatchTotalRef.current = 0;
     setSendQueueLabel("");
-    transferCompletedRef.current = true;
-    startSelfDestruct();
     if (total > 1) {
       setSendSummary(`${total} files sent`);
+      setSendSummaryClearAt(Date.now() + ITEM_CLEAR_SECONDS * 1000);
       if (sendSummaryTimerRef.current !== null) {
         clearTimeout(sendSummaryTimerRef.current);
       }
       sendSummaryTimerRef.current = setTimeout(() => {
         setSendSummary("");
+        setSendSummaryClearAt(0);
         sendSummaryTimerRef.current = null;
-      }, 6000);
+      }, ITEM_CLEAR_SECONDS * 1000);
     }
   };
 
@@ -633,11 +713,9 @@ export function WebDropTool() {
     if (valid.length === 0) return;
     const channel = dataChannelRef.current;
     if (!channel || channel.readyState !== "open") return;
-    // A new batch supersedes any pending self-destruct countdown: the timer
-    // must restart only after the whole queue finishes, so stop it now and
-    // clear the completed flag until the batch ends.
-    cancelSelfDestruct();
-    transferCompletedRef.current = false;
+    // A new batch must not disturb the independent 60s removals of
+    // already-completed items; only clear the batch summary line so the
+    // new batch starts from a clean label.
     setSendSummary("");
     sendQueueRef.current = sendQueueRef.current.concat(valid);
     sendBatchTotalRef.current += valid.length;
@@ -659,12 +737,9 @@ export function WebDropTool() {
 
   const handleReset = () => {
     stopPolling();
-    if (countdownRef.current !== null) {
-      clearInterval(countdownRef.current);
-      countdownRef.current = null;
-    }
-    setCountdown(0);
-    transferCompletedRef.current = false;
+    stopPeerWait();
+    setCloseRequestState("idle");
+    clearAllPendingClears();
     codeRef.current = "";
     setIsSender(false);
     setScreen("start");
@@ -684,6 +759,8 @@ export function WebDropTool() {
     setSendingFileName("");
     setSendQueueLabel("");
     setSendSummary("");
+    setSendSummaryClearAt(0);
+    setCompletedSendItems([]);
     if (sendSummaryTimerRef.current !== null) {
       clearTimeout(sendSummaryTimerRef.current);
       sendSummaryTimerRef.current = null;
@@ -872,9 +949,9 @@ export function WebDropTool() {
                 </div>
               )}
               {sendSummary && (
-                /* Brief "5 files sent" confirmation after a bulk queue
-                    finishes; auto-clears after a few seconds. */
-                <p className="text-xs font-semibold text-[#34D399]">{sendSummary}</p>
+                /* "N files sent" confirmation after a bulk queue finishes;
+                    auto-clears 60s after the batch completed. */
+                <p className="text-xs font-semibold text-[#34D399]">{sendSummary}{sendSummaryClearAt > 0 && (<span className="font-normal text-[#8B93A7]"> (removed in {Math.max(0, Math.ceil((sendSummaryClearAt - nowMs) / 1000))}s)</span>)}</p>
               )}
               {receiveProgress > 0 && receiveProgress < 100 && (
                 <div className="flex flex-col gap-1.5">
@@ -887,28 +964,52 @@ export function WebDropTool() {
                   {receiveSpeedText && (<p className="text-xs text-[#8B93A7]">{receiveSpeedText}</p>)}
                 </div>
               )}
+              {completedSendItems.length > 0 && (
+                <ul className="flex w-full flex-col gap-2">
+                  {completedSendItems.map((item) => (
+                    <li key={item.id} className="flex items-center justify-between gap-2 rounded-lg border border-[#232B45] bg-[#0A0E1A] px-3 py-2 text-xs text-[#8B93A7]">
+                      <span className="min-w-0 break-all">Sent {item.name}</span>
+                      <span className="shrink-0">Removed in {Math.max(0, Math.ceil((item.clearAt - nowMs) / 1000))}s</span>
+                    </li>
+                  ))}
+                </ul>
+              )}
               {receivedFiles.length > 0 && (
                 /* Receiver's download list: one entry per completed file.
                     Bulk sends end with several links stacked vertically,
                     each downloading its own file (download={file.name}
                     keeps the full original filename). */
                 <ul className="flex w-full flex-col gap-2">
-                  {receivedFiles.map((file, i) => (
-                    <li key={`${file.name}-${i}`}>
+                  {receivedFiles.map((file) => (
+                    <li key={file.id} className="flex flex-col gap-1">
                       <a href={file.url} download={file.name} className="block w-full break-all rounded-xl bg-[#34D399] px-4 py-3 text-center text-sm font-semibold text-[#0A0E1A] shadow-[0_0_20px_rgba(52,211,153,0.15)] transition-colors hover:bg-[#2BC08A] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[#34D399] focus-visible:ring-offset-2 focus-visible:ring-offset-[#12172A]">Download {file.name}</a>
+                      <p className="text-center text-[11px] text-[#8B93A7]">Removed in {Math.max(0, Math.ceil((file.clearAt - nowMs) / 1000))}s</p>
                     </li>
                   ))}
                 </ul>
               )}
             </div>
           )}
-          {countdown > 0 && (
-            <p className="flex items-center justify-between rounded-lg border border-[#232B45] bg-[#0A0E1A] px-3 py-2 text-xs text-[#8B93A7]">
-              <span>This session will close automatically in {countdown}s for privacy.</span>
-              <button onClick={cancelSelfDestruct} className="font-semibold text-[#5B8DEF] underline focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[#5B8DEF]">Cancel</button>
-            </p>
+          {closeRequestState === "awaiting-peer" && (
+            <p className="rounded-lg border border-[#232B45] bg-[#0A0E1A] px-3 py-2 text-xs text-[#8B93A7]">Waiting for the other device to confirm closing the session...</p>
           )}
-          <button onClick={handleReset} className="w-full rounded-lg border border-[#232B45] bg-transparent py-3 font-semibold text-[#8B93A7] transition-colors hover:bg-[#1A2040] hover:text-[#E8ECF5] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[#5B8DEF] focus-visible:ring-offset-2 focus-visible:ring-offset-[#12172A]">Start over</button>
+          {closeRequestState === "declined" && (
+            <p className="rounded-lg border border-[#232B45] bg-[#0A0E1A] px-3 py-2 text-xs text-[#8B93A7]">The other device declined to close the session.</p>
+          )}
+          {closeRequestState === "unavailable" && (
+            <p className="rounded-lg border border-[#232B45] bg-[#0A0E1A] px-3 py-2 text-xs text-[#8B93A7]">The other device is unavailable. You can keep sharing or start over.</p>
+          )}
+          {closeRequestState === "incoming" && (
+            <div className="rounded-lg border border-[#232B45] bg-[#0A0E1A] p-4 text-center">
+              <p className="text-sm font-semibold text-[#E8ECF5]">The other device wants to close this session.</p>
+              <p className="mt-1 text-xs text-[#8B93A7]">Closing clears the connection on both devices.</p>
+              <div className="mt-3 flex gap-2">
+                <button onClick={acceptCloseRequest} className="flex-1 rounded-lg bg-[#5B8DEF] py-2.5 text-sm font-semibold text-white transition-colors hover:bg-[#4A7DE0] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[#5B8DEF]">Agree</button>
+                <button onClick={declineCloseRequest} className="flex-1 rounded-lg border border-[#232B45] py-2.5 text-sm font-semibold text-[#8B93A7] transition-colors hover:bg-[#1A2040] hover:text-[#E8ECF5] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[#5B8DEF]">Decline</button>
+              </div>
+            </div>
+          )}
+          <button onClick={requestCloseSession} className="w-full rounded-lg border border-[#232B45] bg-transparent py-3 font-semibold text-[#8B93A7] transition-colors hover:bg-[#1A2040] hover:text-[#E8ECF5] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[#5B8DEF] focus-visible:ring-offset-2 focus-visible:ring-offset-[#12172A]">Close Session</button>
         </div>
       )}
     </div>

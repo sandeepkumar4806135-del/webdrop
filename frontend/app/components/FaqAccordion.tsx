@@ -53,9 +53,9 @@ const FAQ_ITEMS: FaqItem[] = [
       "The Camera button opens your device's camera to take a live photo, which is then sent instantly. It's currently for photos only, not video recording.",
   },
   {
-    question: "Why did my session close automatically?",
+    question: "Do shared files disappear automatically?",
     answer:
-      "For privacy, WebDrop automatically closes a session about 60 seconds after a transfer completes, clearing the connection. You can click “Cancel” on the countdown if you want to keep the session open longer — and any files you received stay downloadable even after the session closes.",
+      "For privacy, each completed file removes itself from the screen about 60 seconds after its own transfer finishes — sent files on the sender's screen and received downloads on the receiver's screen. Sessions stay open until both devices agree to close them with the Close Session button.",
   },
   {
     question: "I got a “Code not found” error — what happened?",
