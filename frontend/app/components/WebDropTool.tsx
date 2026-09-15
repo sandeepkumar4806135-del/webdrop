@@ -8,6 +8,7 @@ import {
   type DragEvent,
 } from "react";
 import QRCode from "qrcode";
+import jsQR from "jsqr";
 
 type Screen = "start" | "sending" | "receiving" | "connected";
 
@@ -79,6 +80,11 @@ export function WebDropTool() {
   const [closeRequestState, setCloseRequestState] = useState<
     "idle" | "awaiting-peer" | "incoming" | "declined" | "unavailable"
   >("idle");
+  // True only when the OTHER device vanishes mid-session (refresh, tab close,
+  // network loss, PWA quit) AFTER the channel was open. We show a plain message
+  // and a "Start New Session" button. We never set this during our own
+  // intentional mutual-consent close, because that flow already resets cleanly.
+  const [unexpectedDisconnect, setUnexpectedDisconnect] = useState(false);
 
   const flowRef = useRef<"sending" | "receiving">("sending");
   const pollRef = useRef<ReturnType<typeof setInterval> | null>(null);
@@ -108,6 +114,20 @@ export function WebDropTool() {
   // Receiver: object URLs of every received file, revoked on session reset.
   const receivedUrlsRef = useRef<string[]>([]);
   const transferIdRef = useRef(0);
+  // Set true right before we intentionally close the peer connection (mutual-
+  // consent close or the lightweight closeConnection teardown). The peer-
+  // connection state-change handlers check this so they do NOT treat the
+  // ensuing "disconnected/failed/closed" as the peer vanishing unexpectedly.
+  const intentionalTeardownRef = useRef(false);
+  // Scanner (QR-code receiver) state
+  const [scannerOpen, setScannerOpen] = useState(false);
+  const [scanError, setScanError] = useState<string | null>(null);
+  const scanVideoRef = useRef<HTMLVideoElement | null>(null);
+  const scanCanvasRef = useRef<HTMLCanvasElement | null>(null);
+  const scanLoopRef = useRef<number | null>(null);
+  const scanStreamRef = useRef<MediaStream | null>(null);
+  const scanScannedRef = useRef(false);
+  const scanFrameCountRef = useRef(0);
 
   const ITEM_CLEAR_SECONDS = 60;
   const makeTransferId = () => {
@@ -293,7 +313,7 @@ export function WebDropTool() {
       // down to cut the load on /api/signal for the whole lifetime of a session.
       stopPolling();
     };
-    channel.onclose = () => {
+        channel.onclose = () => {
       // If the PEER closed first (they accepted our close request, or their
       // side tore down), mirror the lightweight close here so this device's
       // UI also reflects reality — status message, pairing code cleared,
@@ -302,6 +322,12 @@ export function WebDropTool() {
       // teardown (closeConnection/handleReset null dataChannelRef before
       // the onclose event fires asynchronously).
       if (dataChannelRef.current !== channel) return;
+      // If this onclose was NOT caused by our own intentional teardown flag,
+      // treat it as an unexpected peer disconnect.
+      if (!intentionalTeardownRef.current) {
+        setUnexpectedDisconnect(true);
+        setStatusMessage("The other device disconnected unexpectedly.");
+      }
       closeConnection();
     };
     channel.onmessage = (event) => {
@@ -515,10 +541,143 @@ export function WebDropTool() {
       }
       dataChannelRef.current?.close();
       peerConnectionRef.current?.close();
+      // Tear down the QR scanner if it is open when we unmount.
+      if (scanLoopRef.current !== null) {
+        cancelAnimationFrame(scanLoopRef.current);
+        scanLoopRef.current = null;
+      }
+      scanScannedRef.current = false;
+      if (scanStreamRef.current) {
+        scanStreamRef.current.getTracks().forEach((t) => t.stop());
+        scanStreamRef.current = null;
+      }
     };
     // Unmount-only cleanup: closeConnection/handleReset handle the live
     // teardown during the session, so this effect must never re-run.
   }, []);
+
+  // beforeunload warning: while the data channel is open (an active P2P
+  // session), warn the user before they refresh, close the tab, or navigate
+  // away. The dialog text is browser-controlled and cannot be customized
+  // (a deliberate browser security restriction). No listener while on the
+  // start screen, so it never nags before a session exists.
+  useEffect(() => {
+    if (!dataChannelOpen) return;
+    const handler = (e: BeforeUnloadEvent) => {
+      e.preventDefault();
+      e.returnValue = "";
+    };
+    window.addEventListener("beforeunload", handler);
+    return () => window.removeEventListener("beforeunload", handler);
+  }, [dataChannelOpen]);
+
+  // ---------------------------------------------------------------------------
+  // QR code scanner (receiver side)
+  // ---------------------------------------------------------------------------
+  // The "Scan QR Code" button opens a custom camera-based scanner that decodes
+  // the same 4-digit code the sender's QR encodes. On a successful scan we feed
+  // the code straight into handleConnect — no extra button press needed.
+  // All scanner code lives inside the scannerOpen branch; it is a self-
+  // contained feature that never touches the existing bulk-file/chat/close flow.
+
+  // Scan loop: draws a frame to an offscreen canvas and runs jsQR on it.
+  // Throttled to ~every 200 ms (10 rAF ticks at 60 fps) so the UI stays smooth.
+  const scanFrame = () => {
+    const video = scanVideoRef.current;
+    const canvas = scanCanvasRef.current;
+    if (!video || !canvas) return;
+    if (video.readyState !== 4) {
+      scanLoopRef.current = requestAnimationFrame(scanFrame);
+      return;
+    }
+    scanFrameCountRef.current += 1;
+    if (scanFrameCountRef.current % 12 !== 0) {
+      scanLoopRef.current = requestAnimationFrame(scanFrame);
+      return;
+    }
+    const ctx = canvas.getContext("2d", { willReadFrequently: true });
+    if (!ctx) {
+      scanLoopRef.current = requestAnimationFrame(scanFrame);
+      return;
+    }
+    if (canvas.width !== video.videoWidth || canvas.height !== video.videoHeight) {
+      canvas.width = video.videoWidth;
+      canvas.height = video.videoHeight;
+    }
+    ctx.drawImage(video, 0, 0, canvas.width, canvas.height);
+    const imageData = ctx.getImageData(0, 0, canvas.width, canvas.height);
+    const code = jsQR(imageData.data, imageData.width, imageData.height, {
+      inversionAttempts: "attemptBoth",
+    });
+    if (code && /^\d{4}$/.test(code.data.trim())) {
+      scanScannedRef.current = true;
+      // Stop the camera + loop immediately on detection.
+      if (scanStreamRef.current) {
+        scanStreamRef.current.getTracks().forEach((t) => t.stop());
+        scanStreamRef.current = null;
+      }
+      if (scanLoopRef.current !== null) {
+        cancelAnimationFrame(scanLoopRef.current);
+        scanLoopRef.current = null;
+      }
+      const scanned = code.data.trim();
+      setScannerOpen(false);
+      setScanError(null);
+      void handleConnect(scanned);
+      return;
+    }
+    scanLoopRef.current = requestAnimationFrame(scanFrame);
+  };
+
+  const stopScanner = () => {
+    if (scanLoopRef.current !== null) {
+      cancelAnimationFrame(scanLoopRef.current);
+      scanLoopRef.current = null;
+    }
+    scanScannedRef.current = false;
+    if (scanStreamRef.current) {
+      scanStreamRef.current.getTracks().forEach((t) => t.stop());
+      scanStreamRef.current = null;
+    }
+    setScannerOpen(false);
+    setScanError(null);
+  };
+
+  const startScanner = async () => {
+    setScannerOpen(true);
+    setScanError(null);
+    if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
+      setScanError(
+        "Camera access is needed to scan — you can still enter the code manually above.",
+      );
+      setScannerOpen(false);
+      return;
+    }
+    try {
+      const stream = await navigator.mediaDevices.getUserMedia({
+        video: { facingMode: "environment" },
+      });
+      scanStreamRef.current = stream;
+      if (scanVideoRef.current) {
+        scanVideoRef.current.srcObject = stream;
+        try {
+          await scanVideoRef.current.play();
+        } catch {
+          // autoplay may be blocked; the video will still draw frames once
+          // permission is granted and the user interacts.
+        }
+      }
+      scanFrameCountRef.current = 0;
+      scanLoopRef.current = requestAnimationFrame(scanFrame);
+    } catch {
+      setScanError(
+        "Camera access is needed to scan — you can still enter the code manually above.",
+      );
+      setScannerOpen(false);
+    }
+  };
+
+  // Sender entry point: create a room, show the 4-digit code + QR.
   const handleSend = async () => {
     flowRef.current = "sending";
     setIsSender(true);
@@ -539,19 +698,21 @@ export function WebDropTool() {
     }
   };
 
-  const handleConnect = async () => {
-    if (inputCode.trim().length === 0) {
+  // Receiver entry point: join the room for the typed or scanned 4-digit code.
+  const handleConnect = async (scannedCode?: string) => {
+    const codeToUse = (scannedCode !== undefined ? scannedCode : inputCode).trim();
+    if (codeToUse.length === 0) {
       setErrorMessage("Please enter the 4-digit code.");
       return;
     }
     flowRef.current = "receiving";
     setIsSender(false);
-    codeRef.current = inputCode.trim();
+    codeRef.current = codeToUse;
     try {
       const res = await fetch("/api/join-room", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ code: inputCode.trim() }),
+        body: JSON.stringify({ code: codeToUse }),
       });
       if (!res.ok) {
         setErrorMessage("Code not found, please check and try again.");
@@ -738,6 +899,7 @@ export function WebDropTool() {
   const handleReset = () => {
     stopPolling();
     stopPeerWait();
+    stopScanner();
     setCloseRequestState("idle");
     clearAllPendingClears();
     codeRef.current = "";
@@ -817,10 +979,32 @@ export function WebDropTool() {
         <div className="flex flex-col gap-4">
           <p className="text-sm text-[#8B93A7]">Enter the 4-digit code shown on the sender&apos;s device:</p>
           <div className="flex gap-2">
-            <input type="text" inputMode="numeric" maxLength={4} value={inputCode} onChange={(e) => setInputCode(e.target.value)} placeholder="3841" className="w-full flex-1 rounded-lg border border-[#232B45] bg-[#0A0E1A] px-4 py-3 text-center font-[family-name:var(--font-space-grotesk)] text-2xl font-semibold tracking-widest text-[#E8ECF5] outline-none placeholder:text-[#8B93A7]/50 focus:ring-2 focus:ring-[#5B8DEF]" />
-            <button onClick={handleConnect} className="rounded-lg bg-[#5B8DEF] px-6 py-3 font-semibold text-white transition-colors hover:bg-[#4A7DE0] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[#5B8DEF] focus-visible:ring-offset-2 focus-visible:ring-offset-[#12172A]">Connect</button>
+            <input type="text" inputMode="numeric" maxLength={4} value={inputCode} onChange={(e) => setInputCode(e.target.value)} onKeyDown={(e) => { if (e.key === "Enter") void handleConnect(); }} placeholder="3841" className="w-full flex-1 rounded-lg border border-[#232B45] bg-[#0A0E1A] px-4 py-3 text-center font-[family-name:var(--font-space-grotesk)] text-2xl font-semibold tracking-widest text-[#E8ECF5] outline-none placeholder:text-[#8B93A7]/50 focus:ring-2 focus:ring-[#5B8DEF]" />
+            <button onClick={() => void handleConnect()} className="rounded-lg bg-[#5B8DEF] px-6 py-3 font-semibold text-white transition-colors hover:bg-[#4A7DE0] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[#5B8DEF] focus-visible:ring-offset-2 focus-visible:ring-offset-[#12172A]">Connect</button>
           </div>
+          <button onClick={() => void startScanner()} className="w-full rounded-lg border border-[#232B45] bg-transparent py-3 font-semibold text-[#E8ECF5] transition-colors hover:bg-[#1A2040] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[#5B8DEF] focus-visible:ring-offset-2 focus-visible:ring-offset-[#12172A]">Scan QR Code</button>
+          {scanError && (<p className="text-center text-sm text-red-400">{scanError}</p>)}
           {errorMessage && (<p className="text-center text-sm text-red-400">{errorMessage}</p>)}
+        </div>
+      )}
+      {scannerOpen && (
+        /* QR scanner: a live camera preview with an overlay frame. The decode
+            loop in scanFrame runs against the video via an offscreen canvas
+            (jsQR) and auto-connects on a valid 4-digit code. */
+        <div className="flex flex-col items-center gap-4">
+          <p className="text-sm text-[#8B93A7]">Point the camera at the sender&apos;s QR code:</p>
+          <div className="relative h-64 w-64 overflow-hidden rounded-xl border border-[#232B45] bg-black">
+            <video ref={scanVideoRef} playsInline muted className="h-full w-full object-cover" />
+            {/* Corner brackets marking the scan zone */}
+            <div className="pointer-events-none absolute inset-0">
+              <span className="absolute left-3 top-3 h-8 w-8 rounded-tl-lg border-l-4 border-t-4 border-[#5B8DEF]" />
+              <span className="absolute right-3 top-3 h-8 w-8 rounded-tr-lg border-r-4 border-t-4 border-[#5B8DEF]" />
+              <span className="absolute bottom-3 left-3 h-8 w-8 rounded-bl-lg border-b-4 border-l-4 border-[#5B8DEF]" />
+              <span className="absolute bottom-3 right-3 h-8 w-8 rounded-br-lg border-b-4 border-r-4 border-[#5B8DEF]" />
+            </div>
+          </div>
+          <canvas ref={scanCanvasRef} className="hidden" />
+          <button onClick={stopScanner} className="w-full rounded-lg border border-[#232B45] bg-transparent py-3 text-lg font-semibold text-[#E8ECF5] transition-colors hover:bg-[#1A2040] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[#5B8DEF] focus-visible:ring-offset-2 focus-visible:ring-offset-[#12172A]">Cancel</button>
         </div>
       )}
       {screen === "connected" && (
@@ -988,6 +1172,13 @@ export function WebDropTool() {
                   ))}
                 </ul>
               )}
+            </div>
+          )}
+          {unexpectedDisconnect && (
+            <div className="w-full rounded-lg border border-[#232B45] bg-[#0A0E1A] p-4">
+              <p className="text-sm font-semibold text-[#E8ECF5]">The other device disconnected.</p>
+              <p className="mt-1 text-xs text-[#8B93A7]">The connection was lost — the other device may have closed the tab or lost its network.</p>
+              <button onClick={handleReset} className="mt-3 w-full rounded-lg bg-[#5B8DEF] py-2.5 text-sm font-semibold text-white transition-colors hover:bg-[#4A7DE0] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[#5B8DEF]">Start New Session</button>
             </div>
           )}
           {closeRequestState === "awaiting-peer" && (
