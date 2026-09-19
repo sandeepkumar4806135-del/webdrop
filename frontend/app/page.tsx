@@ -239,6 +239,38 @@ export default function LandingPage() {
         </div>
       </section>
 
+      {/* See WebDrop in Action — looping product video showcase.
+          Placed between the hero and How It Works. autoPlay + muted +
+          playsInline + loop: muted is mandatory for autoplay policies
+          (especially mobile Safari/Chrome); no controls — this is a
+          background-style showcase, not a player. Explicit width/height
+          attributes (9:16 source) prevent layout shift while loading. */}
+      <section
+        id="see-it-in-action"
+        className="w-full scroll-mt-16 border-t border-[#E6EAF2] bg-[#FAFBFC]"
+      >
+        <div className="mx-auto max-w-6xl px-6 py-16 text-center lg:py-20">
+          <h2 className="font-[family-name:var(--font-space-grotesk)] text-3xl font-bold tracking-tight text-[#1A1F2E] sm:text-4xl">
+            See WebDrop in Action
+          </h2>
+          <p className="mx-auto mt-3 max-w-xl text-base leading-relaxed text-[#5B6472]">
+            A quick look at instant, cable-free transfers.
+          </p>
+          <div className="mx-auto mt-10 w-full max-w-sm overflow-hidden rounded-2xl border border-[#E2E8F0] bg-white shadow-sm">
+            <video
+              src="/videos/webdrop-intro.mp4"
+              autoPlay
+              loop
+              muted
+              playsInline
+              width={540}
+              height={960}
+              className="block h-auto w-full"
+            />
+          </div>
+        </div>
+      </section>
+
       {/* How It Works — 3-step visual walkthrough */}
       <section
         id="how-it-works"
