@@ -41,15 +41,62 @@ export function detectPlatform(): Platform | null {
   return null;
 }
 
-/** Small badge shown only on the card matching the visitor's own device. */
-export function RecommendedBadge({ platform }: { platform: Platform }) {
-  const [detected, setDetected] = useState<Platform | null>(null);
+/**
+ * Live check: is THIS browsing context running as an installed app RIGHT NOW?
+ *
+ * This answers "am I currently inside a standalone window", NOT "does the user
+ * have the app installed on some device" — those are different questions. The
+ * answer is always re-read from the browser (never cached or persisted), so it
+ * can't go stale.
+ */
+export function isStandaloneNow(): boolean {
+  if (typeof window === "undefined") return false;
+  const nav = navigator as Navigator & { standalone?: boolean };
+  // navigator.standalone is iOS Safari's equivalent of standalone mode
+  // (older iOS versions don't support the matchMedia query).
+  return (
+    window.matchMedia("(display-mode: standalone)").matches ||
+    nav.standalone === true
+  );
+}
+
+/** Current device's platform, client-side only (null during SSR / unknown). */
+export function useDetectedPlatform(): Platform | null {
+  const [platform, setPlatform] = useState<Platform | null>(null);
   useEffect(() => {
-    // Deferred so this client-only detection doesn't run synchronously in
-    // the effect body (avoids SSR/hydration mismatch and cascading renders).
-    const t = setTimeout(() => setDetected(detectPlatform()), 0);
+    // Deferred so client-only detection doesn't run synchronously in the
+    // effect body (avoids SSR/hydration mismatch and cascading renders).
+    const t = setTimeout(() => setPlatform(detectPlatform()), 0);
     return () => clearTimeout(t);
   }, []);
+  return platform;
+}
+
+/**
+ * Live, continuously-revalidated "is this context standalone" flag.
+ *
+ * Re-checked on mount AND on every display-mode change (the media query's
+ * change event), so the UI always reflects the real current browser state
+ * instead of a snapshot that could go stale.
+ */
+function useStandaloneNow(): boolean {
+  const [standalone, setStandalone] = useState(false);
+  useEffect(() => {
+    const mq = window.matchMedia("(display-mode: standalone)");
+    const update = () => setStandalone(isStandaloneNow());
+    const t = setTimeout(update, 0);
+    mq.addEventListener("change", update);
+    return () => {
+      clearTimeout(t);
+      mq.removeEventListener("change", update);
+    };
+  }, []);
+  return standalone;
+}
+
+/** Small badge shown only on the card matching the visitor's own device. */
+export function RecommendedBadge({ platform }: { platform: Platform }) {
+  const detected = useDetectedPlatform();
   if (detected !== platform) return null;
   return (
     <span className="rounded-full bg-[#3B5FE0]/10 px-2.5 py-1 text-xs font-semibold text-[#3B5FE0]">
@@ -59,47 +106,50 @@ export function RecommendedBadge({ platform }: { platform: Platform }) {
 }
 
 /**
- * Install button for Windows / Mac / Android cards (Chromium install prompt).
+ * Install button for the Windows / Mac / Android cards (Chromium install
+ * prompt). `platform` scopes the card so the "Already Installed" state can
+ * only ever appear on the card matching the device the visitor is ACTUALLY
+ * using — other cards are unaffected.
  */
-export function InstallButton() {
+export function InstallButton({ platform }: { platform: Platform }) {
   const [deferred, setDeferred] = useState<BeforeInstallPromptEvent | null>(
     null,
   );
-  const [installed, setInstalled] = useState(false);
   // Give beforeinstallprompt a short grace period to fire before showing
   // the fallback UI, so it never flashes on browsers that will support it.
   const [graceOver, setGraceOver] = useState(false);
+  const detected = useDetectedPlatform();
+  const standalone = useStandaloneNow();
+
+  // "Already Installed" is derived, never stored: it requires BOTH that the
+  // device the visitor is currently using matches THIS card's platform AND
+  // that the current browsing context is genuinely running standalone. A
+  // regular browser tab on an installed device correctly shows Install again
+  // (we can't know from a tab whether the app exists, and claiming it would
+  // produce exactly the false "Already Installed" reports this replaces).
+  const installed = detected === platform && standalone;
 
   useEffect(() => {
-    const checkStandalone = () => {
-      const nav = navigator as Navigator & { standalone?: boolean };
-      // Already running as an installed app (standalone display mode, or the
-      // iOS-specific navigator.standalone flag)?
-      if (
-        window.matchMedia("(display-mode: standalone)").matches ||
-        nav.standalone === true
-      ) {
-        setInstalled(true);
-      }
-    };
     const onPrompt = (e: Event) => {
       e.preventDefault(); // suppress the browser's own mini-infobar
       setDeferred(e as BeforeInstallPromptEvent);
     };
     const onInstalled = () => {
-      setInstalled(true);
+      // NOTE: deliberately NOT used to claim "Already Installed". Chrome on
+      // Android has a documented history of firing `appinstalled` spuriously
+      // (prematurely, or during WebAPK revalidation) on devices where nothing
+      // was installed — trusting it here produced false "Already Installed"
+      // states. Its only reliable use is dropping the one-shot prompt event.
       setDeferred(null);
     };
     window.addEventListener("beforeinstallprompt", onPrompt);
     window.addEventListener("appinstalled", onInstalled);
-    // Standalone check deferred out of the effect body; the 2s grace period
-    // gives beforeinstallprompt time to fire before showing the fallback.
-    const t0 = setTimeout(checkStandalone, 0);
+    // 2s grace period gives beforeinstallprompt time to fire before the
+    // fallback UI shows.
     const timer = setTimeout(() => setGraceOver(true), 2000);
     return () => {
       window.removeEventListener("beforeinstallprompt", onPrompt);
       window.removeEventListener("appinstalled", onInstalled);
-      clearTimeout(t0);
       clearTimeout(timer);
     };
   }, []);
@@ -107,8 +157,10 @@ export function InstallButton() {
   const handleClick = async () => {
     if (!deferred) return;
     await deferred.prompt(); // show the native install dialog
-    const choice = await deferred.userChoice;
-    if (choice.outcome === "accepted") setInstalled(true);
+    // No "installed" claim here either: accepting the prompt installs the
+    // app, but THIS context is still a browser tab (not standalone), so the
+    // derived installed check stays false — accurate. The one-shot event is
+    // consumed either way, so the fallback "Open WebDrop" UI takes over.
     // The event can only be used once — drop it either way.
     setDeferred(null);
   };
@@ -150,7 +202,7 @@ export function InstallButton() {
   return (
     <div className="flex w-full flex-col gap-1.5">
       <Link
-        href="/"
+        href="/app"
         className="w-full rounded-lg border border-[#C9D2E3] bg-white px-4 py-2.5 text-center text-sm font-semibold text-[#1A1F2E] transition-colors hover:border-[#3B5FE0] hover:text-[#3B5FE0] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[#3B5FE0] focus-visible:ring-offset-2 focus-visible:ring-offset-white"
       >
         Open WebDrop
@@ -168,22 +220,13 @@ export function InstallButton() {
  */
 export function IosInstallButton() {
   const [open, setOpen] = useState(false);
-  const [installed, setInstalled] = useState(false);
-
-  useEffect(() => {
-    const checkStandalone = () => {
-      const nav = navigator as Navigator & { standalone?: boolean };
-      if (
-        window.matchMedia("(display-mode: standalone)").matches ||
-        nav.standalone === true
-      ) {
-        setInstalled(true);
-      }
-    };
-    // Deferred out of the effect body (see InstallButton note above).
-    const t = setTimeout(checkStandalone, 0);
-    return () => clearTimeout(t);
-  }, []);
+  const detected = useDetectedPlatform();
+  const standalone = useStandaloneNow();
+  // Same derived rule as the Chromium cards: only claim "installed" when the
+  // visitor's CURRENT device is iOS AND this context is genuinely running
+  // standalone (navigator.standalone is the classic iOS signal; modern iOS
+  // also supports the matchMedia query — isStandaloneNow checks both).
+  const installed = detected === "ios" && standalone;
 
   useEffect(() => {
     if (!open) return;

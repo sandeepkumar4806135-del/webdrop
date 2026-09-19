@@ -3,13 +3,13 @@
 import { usePathname } from "next/navigation";
 
 // Site-wide footer with a route-conditional theme.
-// The /landing page uses a light theme, so the footer switches to light
-// there too; every other page keeps the existing dark navy footer.
+// The marketing homepage ("/") uses a light theme, so the footer switches to
+// light there too; every other page keeps the existing dark navy footer.
 // (This has to be a client component because usePathname only works
 // client-side, while the root layout itself is a server component.)
 export function SiteFooter() {
   const pathname = usePathname();
-  const isLanding = pathname === "/landing";
+  const isLanding = pathname === "/";
 
   if (isLanding) {
     return (

@@ -122,6 +122,10 @@ export function WebDropTool() {
   // Scanner (QR-code receiver) state
   const [scannerOpen, setScannerOpen] = useState(false);
   const [scanError, setScanError] = useState<string | null>(null);
+  // True while the browser's camera-permission prompt is pending (between the
+  // getUserMedia call and its resolution). Drives the "Requesting camera
+  // access..." message so the user knows why nothing is moving yet.
+  const [scanRequesting, setScanRequesting] = useState(false);
   const scanVideoRef = useRef<HTMLVideoElement | null>(null);
   const scanCanvasRef = useRef<HTMLCanvasElement | null>(null);
   const scanLoopRef = useRef<number | null>(null);
@@ -641,39 +645,87 @@ export function WebDropTool() {
     }
     setScannerOpen(false);
     setScanError(null);
+    setScanRequesting(false);
   };
 
-  const startScanner = async () => {
-    setScannerOpen(true);
-    setScanError(null);
-    if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
-      setScanError(
-        "Camera access is needed to scan — you can still enter the code manually above.",
-      );
-      setScannerOpen(false);
+  // Attach the camera stream to the <video> element and kick off the decode
+  // loop. Called right after permission is granted — but React may not have
+  // re-rendered the scanner overlay yet (setScannerOpen was only just
+  // called), so the video ref can still be null. Retry on the next animation
+  // frame until the element is mounted; never spin forever (give up after
+  // ~2s and let the user cancel/retry).
+  const attachStream = (attempt = 0) => {
+    const video = scanVideoRef.current;
+    if (video && scanStreamRef.current) {
+      if (video.srcObject !== scanStreamRef.current) {
+        video.srcObject = scanStreamRef.current;
+      }
+      void video.play().catch(() => {
+        // Autoplay may be blocked; play() isn't required for drawing frames
+        // via drawImage, which works on a paused, loaded video element.
+      });
+      scanFrameCountRef.current = 0;
+      if (scanLoopRef.current === null) {
+        scanLoopRef.current = requestAnimationFrame(scanFrame);
+      }
       return;
     }
+    if (attempt < 120) {
+      requestAnimationFrame(() => attachStream(attempt + 1));
+    }
+  };
+
+  // NOTE: getUserMedia must be invoked while the user's click is still being
+  // handled, or browsers will silently skip the permission prompt. This
+  // function's body runs synchronously up to the getUserMedia call (no await
+  // happens before it), and the button's onClick invokes it directly, so the
+  // permission request always originates from the real user gesture.
+  const startScanner = async () => {
+    setScanError(null);
+    if (
+      !navigator.mediaDevices ||
+      typeof navigator.mediaDevices.getUserMedia !== "function"
+    ) {
+      setScannerOpen(false);
+      setScanError(
+        "No camera available on this device — please enter the code manually.",
+      );
+      return;
+    }
+    setScannerOpen(true);
+    setScanRequesting(true);
     try {
       const stream = await navigator.mediaDevices.getUserMedia({
         video: { facingMode: "environment" },
       });
+      setScanRequesting(false);
       scanStreamRef.current = stream;
-      if (scanVideoRef.current) {
-        scanVideoRef.current.srcObject = stream;
-        try {
-          await scanVideoRef.current.play();
-        } catch {
-          // autoplay may be blocked; the video will still draw frames once
-          // permission is granted and the user interacts.
-        }
-      }
-      scanFrameCountRef.current = 0;
-      scanLoopRef.current = requestAnimationFrame(scanFrame);
-    } catch {
-      setScanError(
-        "Camera access is needed to scan — you can still enter the code manually above.",
-      );
+      attachStream();
+    } catch (err) {
+      setScanRequesting(false);
       setScannerOpen(false);
+      scanStreamRef.current = null;
+      // Map each getUserMedia failure mode to an explicit, actionable
+      // message. The manual code entry stays visible and usable in all
+      // of these cases (the scanner overlay is closed above).
+      const name = err instanceof DOMException ? err.name : "";
+      if (name === "NotAllowedError" || name === "SecurityError") {
+        setScanError(
+          "Camera access was denied. You can enable it in your browser settings, or enter the code manually below.",
+        );
+      } else if (
+        name === "NotFoundError" ||
+        name === "OverconstrainedError" ||
+        name === "NotReadableError"
+      ) {
+        setScanError(
+          "No camera available on this device — please enter the code manually.",
+        );
+      } else {
+        setScanError(
+          "Camera access is needed to scan — you can still enter the code manually below.",
+        );
+      }
     }
   };
 
@@ -995,6 +1047,14 @@ export function WebDropTool() {
           <p className="text-sm text-[#8B93A7]">Point the camera at the sender&apos;s QR code:</p>
           <div className="relative h-64 w-64 overflow-hidden rounded-xl border border-[#232B45] bg-black">
             <video ref={scanVideoRef} playsInline muted className="h-full w-full object-cover" />
+            {/* While the browser's permission prompt is pending the preview is
+                necessarily black — tell the user what's happening instead of
+                leaving a silent black box. */}
+            {scanRequesting && (
+              <div className="absolute inset-0 flex items-center justify-center p-4 text-center text-sm text-[#8B93A7]">
+                Requesting camera access...
+              </div>
+            )}
             {/* Corner brackets marking the scan zone */}
             <div className="pointer-events-none absolute inset-0">
               <span className="absolute left-3 top-3 h-8 w-8 rounded-tl-lg border-l-4 border-t-4 border-[#5B8DEF]" />
