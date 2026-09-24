@@ -20,7 +20,7 @@ import Link from "next/link";
  *   it is never broken or dead.
  */
 
-type Platform = "windows" | "mac" | "android" | "ios";
+export type Platform = "windows" | "mac" | "android" | "ios";
 
 type BeforeInstallPromptEvent = Event & {
   prompt: () => Promise<void>;

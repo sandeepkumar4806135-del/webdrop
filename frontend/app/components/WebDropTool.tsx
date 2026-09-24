@@ -108,6 +108,12 @@ export function WebDropTool() {
   const closeRequestTimerRef = useRef<ReturnType<typeof setTimeout> | null>(
     null,
   );
+  // Auto-reset countdown after an UNEXPECTED peer disconnect: the banner shows
+  // "Returning to the start screen..." and this timer fires the full
+  // handleReset() ~3s later unless the user clicks "Return Now" first.
+  const unexpectedResetTimerRef = useRef<ReturnType<typeof setTimeout> | null>(
+    null,
+  );
   const clearTimersRef = useRef(
     new Map<string, ReturnType<typeof setTimeout>>(),
   );
@@ -327,10 +333,22 @@ export function WebDropTool() {
       // the onclose event fires asynchronously).
       if (dataChannelRef.current !== channel) return;
       // If this onclose was NOT caused by our own intentional teardown flag,
-      // treat it as an unexpected peer disconnect.
+      // treat it as an unexpected peer disconnect and auto-resolve: show the
+      // "returning..." banner and schedule the full reset for ~3s later
+      // (the user can beat it with "Return Now"). The mutual-consent Close
+      // Session flow never reaches here — intentionalTeardownRef is set (and
+      // dataChannelRef nulled) before its close events fire.
       if (!intentionalTeardownRef.current) {
         setUnexpectedDisconnect(true);
-        setStatusMessage("The other device disconnected unexpectedly.");
+        setStatusMessage(
+          "The other device disconnected. Returning to the start screen...",
+        );
+        if (unexpectedResetTimerRef.current === null) {
+          unexpectedResetTimerRef.current = setTimeout(() => {
+            unexpectedResetTimerRef.current = null;
+            handleReset();
+          }, 3000);
+        }
       }
       closeConnection();
     };
@@ -545,6 +563,12 @@ export function WebDropTool() {
       }
       dataChannelRef.current?.close();
       peerConnectionRef.current?.close();
+      // Cancel a pending unexpected-disconnect auto-reset so the timer can't
+      // fire handleReset() against an unmounted component.
+      if (unexpectedResetTimerRef.current !== null) {
+        clearTimeout(unexpectedResetTimerRef.current);
+        unexpectedResetTimerRef.current = null;
+      }
       // Tear down the QR scanner if it is open when we unmount.
       if (scanLoopRef.current !== null) {
         cancelAnimationFrame(scanLoopRef.current);
@@ -952,6 +976,14 @@ export function WebDropTool() {
     stopPolling();
     stopPeerWait();
     stopScanner();
+    // Cancel any pending unexpected-disconnect auto-reset (a "Return Now"
+    // click, or a reset racing the 3s countdown) and clear the flag so the
+    // next session starts clean.
+    if (unexpectedResetTimerRef.current !== null) {
+      clearTimeout(unexpectedResetTimerRef.current);
+      unexpectedResetTimerRef.current = null;
+    }
+    setUnexpectedDisconnect(false);
     setCloseRequestState("idle");
     clearAllPendingClears();
     codeRef.current = "";
@@ -1236,9 +1268,10 @@ export function WebDropTool() {
           )}
           {unexpectedDisconnect && (
             <div className="w-full rounded-lg border border-[#232B45] bg-[#0A0E1A] p-4">
-              <p className="text-sm font-semibold text-[#E8ECF5]">The other device disconnected.</p>
-              <p className="mt-1 text-xs text-[#8B93A7]">The connection was lost — the other device may have closed the tab or lost its network.</p>
-              <button onClick={handleReset} className="mt-3 w-full rounded-lg bg-[#5B8DEF] py-2.5 text-sm font-semibold text-white transition-colors hover:bg-[#4A7DE0] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[#5B8DEF]">Start New Session</button>
+              <p className="text-sm font-semibold text-[#E8ECF5]">The other device disconnected. Returning to the start screen...</p>
+              <p className="mt-1 text-xs text-[#8B93A7]">The connection was lost — the other device may have closed the tab or lost its network. You&apos;ll be back on the start screen in a moment.</p>
+              {/* Auto-reset countdown (~3s); "Return Now" skips the wait. */}
+              <button onClick={handleReset} className="mt-3 w-full rounded-lg bg-[#5B8DEF] py-2.5 text-sm font-semibold text-white transition-colors hover:bg-[#4A7DE0] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[#5B8DEF]">Return Now</button>
             </div>
           )}
           {closeRequestState === "awaiting-peer" && (

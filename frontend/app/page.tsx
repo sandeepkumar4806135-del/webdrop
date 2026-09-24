@@ -1,10 +1,6 @@
 import type { Metadata } from "next";
 import Link from "next/link";
-import {
-  InstallButton,
-  IosInstallButton,
-  RecommendedBadge,
-} from "./components/InstallButton";
+import { DownloadSection } from "./components/DownloadSection";
 import { FaqAccordion } from "./components/FaqAccordion";
 import { ContactForm } from "./components/ContactForm";
 import { StandaloneRedirect } from "./components/StandaloneRedirect";
@@ -330,63 +326,10 @@ export default function LandingPage() {
           </div>
         </div>
       </section>
-      {/* Download / install section */}
-      <section
-        id="download"
-        className="w-full scroll-mt-16 border-t border-[#E6EAF2] bg-[#FAFBFC]"
-      >
-        <div className="mx-auto max-w-6xl px-6 py-16 text-center lg:py-20">
-          <h2 className="font-[family-name:var(--font-space-grotesk)] text-3xl font-bold tracking-tight text-[#1A1F2E] sm:text-4xl">
-            Get WebDrop on Your Device
-          </h2>
-          <p className="mx-auto mt-3 max-w-xl text-base leading-relaxed text-[#5B6472]">
-            No app stores required — WebDrop installs right from your browser
-            as an app on Windows, Mac, Android, and iPhone/iPad.
-          </p>
-          <div className="mt-10 grid gap-6 sm:grid-cols-2 lg:grid-cols-4">
-            {/* Windows */}
-            <div className="flex flex-col items-center gap-3 rounded-2xl border border-[#E6EAF2] bg-white p-6 text-center">
-              <RecommendedBadge platform="windows" />
-              <svg width="40" height="40" viewBox="0 0 24 24" fill="none" aria-hidden="true" className="text-[#3B5FE0]">
-                <rect x="3" y="4" width="18" height="12" rx="2" stroke="currentColor" strokeWidth="2" />
-                <path d="M8 20h8M12 16v4" stroke="currentColor" strokeWidth="2" strokeLinecap="round" />
-              </svg>
-              <h3 className="font-[family-name:var(--font-space-grotesk)] text-lg font-bold text-[#1A1F2E]">Windows</h3>
-              <InstallButton platform="windows" />
-            </div>
-            {/* Mac */}
-            <div className="flex flex-col items-center gap-3 rounded-2xl border border-[#E6EAF2] bg-white p-6 text-center">
-              <RecommendedBadge platform="mac" />
-              <svg width="40" height="40" viewBox="0 0 24 24" fill="none" aria-hidden="true" className="text-[#3B5FE0]">
-                <rect x="3" y="4" width="18" height="12" rx="2" stroke="currentColor" strokeWidth="2" />
-                <path d="M2 20h20" stroke="currentColor" strokeWidth="2" strokeLinecap="round" />
-              </svg>
-              <h3 className="font-[family-name:var(--font-space-grotesk)] text-lg font-bold text-[#1A1F2E]">Mac</h3>
-              <InstallButton platform="mac" />
-            </div>
-            {/* Android */}
-            <div className="flex flex-col items-center gap-3 rounded-2xl border border-[#E6EAF2] bg-white p-6 text-center">
-              <RecommendedBadge platform="android" />
-              <svg width="40" height="40" viewBox="0 0 24 24" fill="none" aria-hidden="true" className="text-[#3B5FE0]">
-                <rect x="7" y="2" width="10" height="20" rx="2" stroke="currentColor" strokeWidth="2" />
-                <path d="M11 18h2" stroke="currentColor" strokeWidth="2" strokeLinecap="round" />
-              </svg>
-              <h3 className="font-[family-name:var(--font-space-grotesk)] text-lg font-bold text-[#1A1F2E]">Android</h3>
-              <InstallButton platform="android" />
-            </div>
-            {/* iPhone & iPad */}
-            <div className="flex flex-col items-center gap-3 rounded-2xl border border-[#E6EAF2] bg-white p-6 text-center">
-              <RecommendedBadge platform="ios" />
-              <svg width="40" height="40" viewBox="0 0 24 24" fill="none" aria-hidden="true" className="text-[#3B5FE0]">
-                <rect x="7" y="2" width="10" height="20" rx="2" stroke="currentColor" strokeWidth="2" />
-                <circle cx="12" cy="18" r="1" fill="currentColor" />
-              </svg>
-              <h3 className="font-[family-name:var(--font-space-grotesk)] text-lg font-bold text-[#1A1F2E]">iPhone &amp; iPad</h3>
-              <IosInstallButton />
-            </div>
-          </div>
-        </div>
-      </section>
+      {/* Download / install section — client component (platform detection).
+          Renders a single card for the visitor's detected device, falling
+          back to the 4-card grid when detection isn't confident. */}
+      <DownloadSection />
       {/* FAQ section — the nav "FAQ" link scrolls here. The accordion
           itself is a client component (FaqAccordion) so this page stays
           a server component. */}
