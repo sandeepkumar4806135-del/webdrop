@@ -2,6 +2,7 @@
 
 import { useEffect, useState } from "react";
 import Link from "next/link";
+import { useInstallPrompt } from "./InstallPromptCapture";
 
 /**
  * InstallButton + related pieces for the landing page's Download section.
@@ -16,16 +17,14 @@ import Link from "next/link";
  *   The iOS variant instead shows a small modal with manual
  *   "Add to Home Screen" instructions.
  * - Fallback: if the event never fires (unsupported browser, or criteria not
- *   met), the button degrades into a plain link to "/" with a short hint, so
- *   it is never broken or dead.
+ *   met), the button degrades into a plain link to "/app" with a short hint,
+ *   so it is never broken or dead. The beforeinstallprompt listener itself is
+ *   NOT owned by this component — it lives at module-evaluation level in
+ *   InstallPromptCapture.tsx (mounted in the root layout) so an event firing
+ *   before this section mounts is still captured.
  */
 
 export type Platform = "windows" | "mac" | "android" | "ios" | "linux";
-
-type BeforeInstallPromptEvent = Event & {
-  prompt: () => Promise<void>;
-  userChoice: Promise<{ outcome: "accepted" | "dismissed" }>;
-};
 
 export function detectPlatform(): Platform | null {
   if (typeof navigator === "undefined") return null;
@@ -119,11 +118,18 @@ export function RecommendedBadge({ platform }: { platform: Platform }) {
  * using — other cards are unaffected.
  */
 export function InstallButton({ platform }: { platform: Platform }) {
-  const [deferred, setDeferred] = useState<BeforeInstallPromptEvent | null>(
-    null,
-  );
-  // Give beforeinstallprompt a short grace period to fire before showing
-  // the fallback UI, so it never flashes on browsers that will support it.
+  // The beforeinstallprompt listener is NOT attached here: it's captured at
+  // module-evaluation level by InstallPromptCapture (mounted in the root
+  // layout) from the moment the page bundle loads — even before hydration,
+  // and immune to this card remounting when platform detection resolves.
+  const { deferred, consume } = useInstallPrompt();
+  // Grace period before the fallback UI: Chrome can take several seconds on
+  // a fresh first-ever load (service-worker registration + installability
+  // evaluation) to fire beforeinstallprompt. The old 2s window was too
+  // short and produced false fallbacks on exactly that first visit. Even
+  // after this window, a later event still upgrades the button to "Install
+  // App" (the deferred branch renders before the graceOver branch), so the
+  // fallback is never final while the browser may still fire the event.
   const [graceOver, setGraceOver] = useState(false);
   const detected = useDetectedPlatform();
   const standalone = useStandaloneNow();
@@ -137,28 +143,11 @@ export function InstallButton({ platform }: { platform: Platform }) {
   const installed = detected === platform && standalone;
 
   useEffect(() => {
-    const onPrompt = (e: Event) => {
-      e.preventDefault(); // suppress the browser's own mini-infobar
-      setDeferred(e as BeforeInstallPromptEvent);
-    };
-    const onInstalled = () => {
-      // NOTE: deliberately NOT used to claim "Already Installed". Chrome on
-      // Android has a documented history of firing `appinstalled` spuriously
-      // (prematurely, or during WebAPK revalidation) on devices where nothing
-      // was installed — trusting it here produced false "Already Installed"
-      // states. Its only reliable use is dropping the one-shot prompt event.
-      setDeferred(null);
-    };
-    window.addEventListener("beforeinstallprompt", onPrompt);
-    window.addEventListener("appinstalled", onInstalled);
-    // 2s grace period gives beforeinstallprompt time to fire before the
-    // fallback UI shows.
-    const timer = setTimeout(() => setGraceOver(true), 2000);
-    return () => {
-      window.removeEventListener("beforeinstallprompt", onPrompt);
-      window.removeEventListener("appinstalled", onInstalled);
-      clearTimeout(timer);
-    };
+    // 10s grace period (was 2s — see the comment above): plenty of time for
+    // Chrome/Edge to finish first-visit installability evaluation before we
+    // fall back to the generic message.
+    const timer = setTimeout(() => setGraceOver(true), 10000);
+    return () => clearTimeout(timer);
   }, []);
 
   const handleClick = async () => {
@@ -169,7 +158,7 @@ export function InstallButton({ platform }: { platform: Platform }) {
     // derived installed check stays false — accurate. The one-shot event is
     // consumed either way, so the fallback "Open WebDrop" UI takes over.
     // The event can only be used once — drop it either way.
-    setDeferred(null);
+    consume();
   };
 
   if (installed) {

@@ -1,6 +1,7 @@
 import type { Metadata, Viewport } from "next";
 import { Space_Grotesk, Inter } from "next/font/google";
 import { ServiceWorkerRegister } from "./components/ServiceWorkerRegister";
+import { InstallPromptCapture } from "./components/InstallPromptCapture";
 import { SiteFooter } from "./components/SiteFooter";
 import "./globals.css";
 
@@ -50,6 +51,10 @@ export default function RootLayout({ children }: LayoutProps<"/">) {
       <body className="min-h-full flex flex-col bg-[#0A0E1A] font-[family-name:var(--font-inter)]">
         {/* Registers /sw.js client-side for PWA installability. */}
         <ServiceWorkerRegister />
+        {/* Captures beforeinstallprompt at module-eval time (earliest point
+            in the client bundle) so the Download section's install button
+            never misses an event that fires before it mounts. */}
+        <InstallPromptCapture />
         {children}
         <SiteFooter />
       </body>
