@@ -40,6 +40,10 @@ const formatSpeedEta = (
 };
 
 const POLL_INTERVAL_MS = 1200;
+// Heartbeat cadence and dead-peer threshold: a ping every 5s; 3 missed pings
+// (>=15s of total silence from the peer) counts as a genuine disconnect.
+const HEARTBEAT_INTERVAL_MS = 5000;
+const HEARTBEAT_TIMEOUT_MS = 15000;
 
 export function WebDropTool() {
   const [screen, setScreen] = useState<Screen>("start");
@@ -114,6 +118,13 @@ export function WebDropTool() {
   const unexpectedResetTimerRef = useRef<ReturnType<typeof setTimeout> | null>(
     null,
   );
+  // Heartbeat/liveness: interval handle + timestamp of the last message
+  // received from the peer (any kind — ping, chat, file, control). In-memory
+  // refs only; nothing persists across loads.
+  const heartbeatIntervalRef = useRef<ReturnType<typeof setInterval> | null>(
+    null,
+  );
+  const lastPeerMessageAtRef = useRef(0);
   const clearTimersRef = useRef(
     new Map<string, ReturnType<typeof setTimeout>>(),
   );
@@ -204,6 +215,7 @@ export function WebDropTool() {
      stays on the current screen with all download links intact. */
   const closeConnection = () => {
     stopPeerWait();
+    stopHeartbeat();
     setCloseRequestState("idle");
     if (pollRef.current !== null) {
       clearInterval(pollRef.current);
@@ -312,11 +324,66 @@ export function WebDropTool() {
     peerConnectionRef.current = pc;
     return pc;
   };
+  // ---------------------------------------------------------------------------
+  // Heartbeat / liveness detection. Native connectionstatechange/
+  // iceconnectionstatechange events (and datachannel onclose) are slow or
+  // unreliable after a hard app-kill / force-close — no graceful shutdown
+  // signal is sent, so they can take 30s+ or never fire. Once the channel is
+  // open, each side sends { type: "ping" } every 5s; ANY incoming message
+  // stamps lastPeerMessageAtRef. >=15s of silence = genuine disconnect.
+  // The native close event stays as a backup signal — whichever fires first
+  // wins, and triggerUnexpectedDisconnect() de-dupes so the flow (banner +
+  // 3s auto-reset) never runs twice.
+  const triggerUnexpectedDisconnect = () => {
+    // De-dupe: the auto-reset timer only exists while the flow is active,
+    // so a racing second signal (heartbeat timeout + native onclose) is a
+    // no-op instead of restarting the countdown.
+    if (unexpectedResetTimerRef.current !== null) return;
+    setUnexpectedDisconnect(true);
+    setStatusMessage(
+      "The other device disconnected. Returning to the start screen...",
+    );
+    unexpectedResetTimerRef.current = setTimeout(() => {
+      unexpectedResetTimerRef.current = null;
+      handleReset();
+    }, 3000);
+  };
+
+  const stopHeartbeat = () => {
+    if (heartbeatIntervalRef.current !== null) {
+      clearInterval(heartbeatIntervalRef.current);
+      heartbeatIntervalRef.current = null;
+    }
+  };
+
+  const startHeartbeat = () => {
+    stopHeartbeat();
+    heartbeatIntervalRef.current = setInterval(() => {
+      const channel = dataChannelRef.current;
+      if (channel && channel.readyState === "open") {
+        try {
+          channel.send(JSON.stringify({ type: "ping" }));
+        } catch {
+          // Send can fail while the channel is dying — the liveness check
+          // below and/or onclose will handle the disconnect.
+        }
+      }
+      if (Date.now() - lastPeerMessageAtRef.current >= HEARTBEAT_TIMEOUT_MS) {
+        triggerUnexpectedDisconnect();
+      }
+    }, HEARTBEAT_INTERVAL_MS);
+  };
+
   const setupDataChannel = (channel: RTCDataChannel) => {
     dataChannelRef.current = channel;
     channel.binaryType = "arraybuffer";
     channel.onopen = () => {
       setDataChannelOpen(true);
+      // Liveness heartbeat starts now that the channel is live. Stamp the
+      // initial "last seen peer message" time so the 15s window starts at
+      // the moment the channel opened.
+      lastPeerMessageAtRef.current = Date.now();
+      startHeartbeat();
       setStatusMessage("P2P connection established!");
       // The direct peer-to-peer channel is now live, so there is no reason to
       // keep asking the server for signaling messages anymore. Shut the poller
@@ -332,32 +399,36 @@ export function WebDropTool() {
       // teardown (closeConnection/handleReset null dataChannelRef before
       // the onclose event fires asynchronously).
       if (dataChannelRef.current !== channel) return;
-      // If this onclose was NOT caused by our own intentional teardown flag,
-      // treat it as an unexpected peer disconnect and auto-resolve: show the
-      // "returning..." banner and schedule the full reset for ~3s later
-      // (the user can beat it with "Return Now"). The mutual-consent Close
-      // Session flow never reaches here — intentionalTeardownRef is set (and
-      // dataChannelRef nulled) before its close events fire.
-      if (!intentionalTeardownRef.current) {
-        setUnexpectedDisconnect(true);
-        setStatusMessage(
-          "The other device disconnected. Returning to the start screen...",
-        );
-        if (unexpectedResetTimerRef.current === null) {
-          unexpectedResetTimerRef.current = setTimeout(() => {
-            unexpectedResetTimerRef.current = null;
-            handleReset();
-          }, 3000);
-        }
-      }
+      // Stop the heartbeat first — the channel is gone either way.
+      stopHeartbeat();
+      // Native close event — kept as a BACKUP signal on top of the
+      // heartbeat timeout (whichever fires first wins; the shared trigger
+      // de-dupes so the flow never runs twice). If this onclose was NOT
+      // caused by our own intentional teardown flag, treat it as an
+      // unexpected peer disconnect: banner + 3s auto-reset with "Return Now".
+      // The mutual-consent Close Session flow never reaches here —
+      // intentionalTeardownRef is set (and dataChannelRef nulled) before its
+      // close events fire.
       closeConnection();
+      if (!intentionalTeardownRef.current) {
+        triggerUnexpectedDisconnect();
+      }
     };
     channel.onmessage = (event) => {
+      // ANY incoming message from the peer (ping, chat, file chunk, close
+      // control) refreshes the liveness timestamp used by the heartbeat
+      // timeout check.
+      lastPeerMessageAtRef.current = Date.now();
       if (typeof event.data === "string") {
         const text = event.data as string;
         if (text.startsWith("{")) {
           try {
             const parsed = JSON.parse(text);
+            if (parsed.type === "ping") {
+              // Pure heartbeat liveness signal — never shown as a chat
+              // message; its only effect was stamping the timestamp above.
+              return;
+            }
             if (parsed.type === "file-meta") {
               // Defensive cap: a peer could declare an extremely long filename
               // to break the layout. Truncate to 255 chars for display/save
@@ -569,6 +640,9 @@ export function WebDropTool() {
         clearTimeout(unexpectedResetTimerRef.current);
         unexpectedResetTimerRef.current = null;
       }
+      // Stop the heartbeat interval on unmount — nothing may keep ticking
+      // (or calling setState-triggering logic) after the component is gone.
+      stopHeartbeat();
       // Tear down the QR scanner if it is open when we unmount.
       if (scanLoopRef.current !== null) {
         cancelAnimationFrame(scanLoopRef.current);
@@ -976,6 +1050,10 @@ export function WebDropTool() {
     stopPolling();
     stopPeerWait();
     stopScanner();
+    // Stop the heartbeat so no ping/timeout keeps running after the session
+    // legitimately ends (manual start-over, mutual-consent close, Return Now,
+    // or the 3s auto-reset itself).
+    stopHeartbeat();
     // Cancel any pending unexpected-disconnect auto-reset (a "Return Now"
     // click, or a reset racing the 3s countdown) and clear the flag so the
     // next session starts clean.
