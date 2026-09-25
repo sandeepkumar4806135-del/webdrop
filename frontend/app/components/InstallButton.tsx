@@ -20,7 +20,7 @@ import Link from "next/link";
  *   it is never broken or dead.
  */
 
-export type Platform = "windows" | "mac" | "android" | "ios";
+export type Platform = "windows" | "mac" | "android" | "ios" | "linux";
 
 type BeforeInstallPromptEvent = Event & {
   prompt: () => Promise<void>;
@@ -38,6 +38,12 @@ export function detectPlatform(): Platform | null {
   if (/Android/.test(ua)) return "android";
   if (/Windows/.test(ua)) return "windows";
   if (/Macintosh/.test(ua)) return "mac";
+  // Linux check MUST come after the Android check: Android user agents also
+  // contain "Linux" (e.g. "Linux; Android 14"), so a phone would otherwise be
+  // misidentified as a Linux desktop. Linux desktop Chrome/Edge support the
+  // same real beforeinstallprompt flow as Windows/Mac, so it reuses the
+  // regular InstallButton (not the iOS instructions modal).
+  if (/Linux/.test(ua)) return "linux";
   return null;
 }
 
@@ -106,9 +112,10 @@ export function RecommendedBadge({ platform }: { platform: Platform }) {
 }
 
 /**
- * Install button for the Windows / Mac / Android cards (Chromium install
- * prompt). `platform` scopes the card so the "Already Installed" state can
- * only ever appear on the card matching the device the visitor is ACTUALLY
+ * Install button for the Windows / Mac / Android / Linux cards (Chromium
+ * install prompt — Linux desktop Chrome/Edge support the same
+ * beforeinstallprompt flow). `platform` scopes the card so the "Already
+ * Installed" state can only ever appear on the card matching the device the visitor is ACTUALLY
  * using — other cards are unaffected.
  */
 export function InstallButton({ platform }: { platform: Platform }) {
